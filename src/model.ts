@@ -389,6 +389,9 @@ function typesafeClient(): TypeSafeClient {
   return (typesafe ??= new TypeSafeClient({
     apiKey: process.env.TYPESAFE_API_KEY,
     defaultModel: config.jevModelId,
+    // Two rounds share the tick's budget, so neither may spend all of it. The
+    // SDK defaults to 10s, which only matches a 20s budget by coincidence.
+    timeout: Math.max(1_000, Math.floor(config.jevDeadlineMs / 2)),
     retry: { maxRetries: 0 },
   }));
 }
