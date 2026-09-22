@@ -40,7 +40,7 @@ export function portfolioPnl(
 }
 
 /**
- * Hyperliquid equity across the wallets behind the sleeves, counting each wallet
+ * Venue equity across the accounts behind the sleeves, counting each account
  * once. Sleeves sharing one account all report that account's equity, so adding
  * them up multiplies the balance by the number of coins.
  */

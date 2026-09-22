@@ -152,7 +152,7 @@ export function shortTx(h: string | null | undefined): string {
   return h.length <= 6 ? h : `${h.slice(0, 6)}…`;
 }
 
+/** Empty when the venue has no per-fill page, as a centralized exchange does not. */
 export function txUrl(h: string, explorerTx?: string): string {
-  if (explorerTx) return `${explorerTx}${h}`;
-  return `https://app.hyperliquid.xyz/explorer/tx/${h}`;
+  return explorerTx ? `${explorerTx}${h}` : "";
 }

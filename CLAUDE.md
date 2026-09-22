@@ -8,6 +8,13 @@ The bot is Bun. The dashboard is Next in `web/`. That split is intentional: keys
 
 ## Bot (repo root)
 
+`VENUE` picks the exchange: `hyperliquid` (default) or `okx`. `src/venue.ts` is the
+contract a venue answers to, `src/venues.ts` builds the pair, and each venue keeps
+its feed, market and account parsing under `src/<venue>/`. Shared code above that
+line counts coins on a price grid and never learns a venue's own rule: Hyperliquid
+derives its tick from szDecimals, OKX states `tickSz` and sizes orders in contracts.
+Keep new venue specifics inside the venue folder.
+
 - `bun <file>` instead of `node` or `ts-node`
 - `bun test` instead of jest or vitest
 - `bun install` / `bun run <script>`

@@ -4,6 +4,11 @@ export type Side = "buy" | "sell";
 export type Bias = "long" | "short";
 /** `hold` posts nothing and pulls any resting quote. */
 export type Intent = "open" | "close" | "hold";
+/**
+ * Venue order handle. Hyperliquid oids are numbers. OKX ordIds are decimal
+ * strings past 2^53, so they stay strings and never round-trip through Number.
+ */
+export type OrderId = string | number;
 /** Jev's read of the multi-timeframe picture, taken before it picks a side. */
 export type Trend = "up" | "down" | "range" | "unclear";
 
@@ -25,9 +30,9 @@ export interface Quote {
   price: number;
   size: number;
   txHash: string | null;
-  cancel: number[];
+  cancel: OrderId[];
   status: "placed" | "reverted" | "sim";
-  orderId: number | null;
+  orderId: OrderId | null;
   capped: boolean;
   reduceOnly?: boolean;
   unchanged?: boolean;
@@ -41,7 +46,7 @@ export interface Fill {
   size: number;
   price: number;
   txHash: string | null;
-  orderId: number;
+  orderId: OrderId;
   simulated: boolean;
   feeUsd?: number;
   closedPnl?: number;
@@ -152,6 +157,7 @@ export interface Meta {
   venue: string;
   coin: string;
   pair: string;
+  /** Empty when the venue has no per-fill explorer, as a CEX does not. */
   explorerTx: string;
   tickMs: number;
   sleeves: SleeveMeta[];

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { pullResting, repeatMeansGiveUp, type Market } from "../src/market";
+import { pullResting, repeatMeansGiveUp, type VenueMarket } from "../src/venue";
 import type { Model, ModelDecision, TradeState } from "../src/model";
 import { leverageRungs, liveIntent, parseLeverage, planQuote, quoteAction } from "../src/plan";
 import { TradeFeed } from "../src/trades";
@@ -102,9 +102,9 @@ class ScriptModel implements Model {
 class FakeMarket {
   readonly coin = "BTC";
   readonly pair = "BTC-USD";
-  readonly wallet = null;
+  readonly liveKey = false;
   readonly account = null;
-  readonly szDecimals = 5;
+  readonly sizeDecimals = 5;
   readonly maxLeverage = 40;
   readonly takerFeeBps = 4.5;
   readonly fillPrints: [] = [];
@@ -140,7 +140,7 @@ class FakeMarket {
 
 function desk(model: ScriptModel, market = new FakeMarket()) {
   const events: BlockEvent[] = [];
-  const trader = new Trader(market as unknown as Market, model, (e) => events.push(e));
+  const trader = new Trader(market as unknown as VenueMarket, model, (e) => events.push(e));
   return { trader, market, events };
 }
 

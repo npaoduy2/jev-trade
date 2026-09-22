@@ -1,5 +1,5 @@
 import { config } from "./config";
-import type { Fill, Side } from "./types";
+import type { Fill, OrderId, Side } from "./types";
 
 export interface TradePrint { block: number; price: number; size: number; side: Side }
 
@@ -7,7 +7,7 @@ export interface TradePrint { block: number; price: number; size: number; side: 
 export interface MakerFill {
   block: number;
   txHash: string;
-  orderId: number;
+  orderId: OrderId;
   price: number;
   size: number;
   updatedSize: number;
@@ -142,7 +142,7 @@ export class TradeFeed {
   }
 }
 
-export function takeLiveFills(orders: Map<number, Resting>, raw: MakerFill[]): (Fill & { block: number })[] {
+export function takeLiveFills(orders: Map<OrderId, Resting>, raw: MakerFill[]): (Fill & { block: number })[] {
   const out: (Fill & { block: number })[] = [];
   for (const f of raw) {
     const o = orders.get(f.orderId);
@@ -165,7 +165,7 @@ export function takeLiveFills(orders: Map<number, Resting>, raw: MakerFill[]): (
   return out;
 }
 
-export function takeSimFills(orders: Map<number, Resting>, prints: TradePrint[]): (Fill & { block: number })[] {
+export function takeSimFills(orders: Map<OrderId, Resting>, prints: TradePrint[]): (Fill & { block: number })[] {
   const out: (Fill & { block: number })[] = [];
   for (const p of prints) {
     for (const [id, o] of orders) {

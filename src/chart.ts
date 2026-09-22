@@ -1,14 +1,11 @@
-import { config } from "./config";
 import type { PricePoint, Side } from "./types";
-
-const INFO_URL = (testnet: boolean) =>
-  testnet ? "https://api.hyperliquid-testnet.xyz/info" : "https://api.hyperliquid.xyz/info";
 
 export const CHART_INTERVAL = "1m";
 export const CHART_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
-const MINUTE_MS = 60 * 1000;
+export const MINUTE_MS = 60 * 1000;
+/** Deepest 1m history a venue is asked for. One pull, then the socket carries it. */
+export const MAX_MINUTE_BARS = 5000;
 const SECOND_MS = 1000;
-const MAX_CANDLES = 5000;
 const MAX_1S = 15 * 60;
 
 export type BarSize = NonNullable<PricePoint["bar"]>;
@@ -88,26 +85,9 @@ export class VenueChart {
     return this.cached;
   }
 
-  async loadCandles(coin: string, now = Date.now()) {
-    const minuteSpan = MAX_CANDLES * MINUTE_MS;
-    await Promise.all([
-      this.pullCandles(coin, "15m", now - CHART_LOOKBACK_MS, now),
-      this.pullCandles(coin, "1m", now - minuteSpan, now),
-    ]);
-  }
-
-  private async pullCandles(coin: string, interval: string, startTime: number, endTime: number) {
-    const res = await fetch(INFO_URL(config.hlTestnet), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "candleSnapshot", req: { coin, interval, startTime, endTime } }),
-    });
-    if (!res.ok) throw new Error(`hl candleSnapshot HTTP ${res.status}`);
-    const rows = (await res.json()) as unknown;
-    if (!Array.isArray(rows)) return;
-    for (const row of rows) {
-      if (row && typeof row === "object") this.upsertCandle(row as { t?: unknown; o?: unknown; h?: unknown; l?: unknown; c?: unknown; i?: unknown });
-    }
+  /** Seed a whole interval at once. The venue feed pulls the rows and names the bar. */
+  seed(rows: Ohlc[], bar: BarSize) {
+    for (const row of rows) this.putCandle(row, bar);
   }
 
   /** Fold a live mid into the forming 1s candle. Venue has no 1s snapshot. */
@@ -135,10 +115,13 @@ export class VenueChart {
     this.dirty = true;
   }
 
-  upsertCandle(raw: { t?: unknown; o?: unknown; h?: unknown; l?: unknown; c?: unknown; i?: unknown }) {
+  upsertCandle(raw: { t?: unknown; o?: unknown; h?: unknown; l?: unknown; c?: unknown; i?: unknown }, bar?: BarSize) {
     const next = candleOhlc(raw);
     if (!next) return;
-    const bar = candleBar(raw);
+    this.putCandle(next, bar ?? candleBar(raw));
+  }
+
+  private putCandle(next: Ohlc, bar: BarSize) {
     const map = bar === "15m" ? this.candles15m : bar === "1s" ? this.candles1s : this.candles1m;
     const prev = map.get(next.ts);
     if (prev && prev.open === next.open && prev.high === next.high && prev.low === next.low && prev.close === next.close) return;

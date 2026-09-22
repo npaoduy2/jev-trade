@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { accountFromClearinghouse, fillDir, FillPnlBook, spotUsdc } from "../src/account";
+import { FillPnlBook } from "../src/account";
+import { accountFromClearinghouse, fillDir, spotUsdc } from "../src/hl/account";
 
 const state = {
   withdrawable: "546.14",

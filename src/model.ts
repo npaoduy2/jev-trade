@@ -10,6 +10,8 @@ import type { FlowWindow } from "./trades";
 export interface TradeState {
   coin: string;
   market: string;
+  /** The exchange the book, the fills and the collateral all belong to. */
+  venue: string;
   tick: number;
   tickMs: number;
   mid: number;
@@ -156,7 +158,7 @@ export function marketFacing(state: TradeState, read: { trend: Trend } | null = 
 export function fieldGuide(state: TradeState): string {
   const asset = state.coin;
   return [
-    `${asset} perp on Hyperliquid, ${state.market}. sizes in ${asset}, prices and notionals in quote currency. bps = 1e-4.`,
+    `${asset} perp on ${state.venue}, ${state.market}. sizes in ${asset}, prices and notionals in quote currency. bps = 1e-4.`,
     `guide = this list. read = your own trend answer for this tick, null while it is pending.`,
     `mid = (bestBid+bestAsk)/2. spreadBps = (ask-bid)/mid in bps.`,
     `bookImbalance = (bidSz-askSz)/(bidSz+askSz) within 100bps of mid, above 0 = more resting bids.`,

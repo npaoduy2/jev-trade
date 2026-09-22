@@ -1,26 +1,24 @@
-import { config } from "./config";
-import type { Book } from "./types";
-import { fillDir, type ClearinghouseLike, type FillPnlLike, type SpotStateLike } from "./account";
-import { bookFromLevels } from "./book";
-import { CHART_INTERVAL, VenueChart } from "./chart";
-import { parseAssetCtx, type AssetCtx } from "./indicators";
-import { sameCoin } from "./sleeves";
-import { Timeframes } from "./timeframes";
-import { TradeFeed } from "./trades";
-
-const INFO_URL = (testnet: boolean) =>
-  testnet ? "https://api.hyperliquid-testnet.xyz/info" : "https://api.hyperliquid.xyz/info";
-const WS_URL = (testnet: boolean) =>
-  testnet ? "wss://api.hyperliquid-testnet.xyz/ws" : "wss://api.hyperliquid.xyz/ws";
+import { config } from "../config";
+import type { Book } from "../types";
+import type { FillPnlLike } from "../account";
+import { fillDir, type ClearinghouseLike, type SpotStateLike } from "./account";
+import { bookFromLevels } from "../book";
+import { CHART_INTERVAL, CHART_LOOKBACK_MS, MAX_MINUTE_BARS, MINUTE_MS, VenueChart } from "../chart";
+import { parseAssetCtx, type AssetCtx } from "../indicators";
+import { sameCoin } from "../sleeves";
+import { BAR_MS, Timeframes, type HigherTf } from "../timeframes";
+import { TradeFeed } from "../trades";
+import type { VenueFeed } from "../venue";
+import { candles, info, WS_URL } from "./rest";
 
 /**
  * Local Hyperliquid book + tape over the official WS, with an HTTP snapshot so startup
  * does not wait on the socket. Ticks fire at `tickMs` once a book exists.
  */
-export class Feed {
+export class HlFeed implements VenueFeed {
   readonly trades = new TradeFeed();
   readonly chart = new VenueChart();
-  readonly tfs = new Timeframes();
+  readonly tfs = new Timeframes((tf, bars, now) => this.pullCloses(tf, bars, now));
   assetCtx: AssetCtx | null = null;
   book: Book | null = null;
   tick = 0;
@@ -42,7 +40,7 @@ export class Feed {
 
   async connect(): Promise<void> {
     await this.snapshot();
-    await this.chart.loadCandles(this.coin).catch((e) => {
+    await this.loadCandles().catch((e) => {
       console.warn(`${this.coin} candles: ${(e as Error).message.slice(0, 160)}`);
     });
     // Higher intervals come over REST. Block once so the first tick sees them.
@@ -68,14 +66,26 @@ export class Feed {
     this.maybeTick();
   }
 
+  /** Seed the chart once. The candle socket carries it from there. */
+  private async loadCandles(now = Date.now()) {
+    const [m15, m1] = await Promise.all([
+      candles(this.coin, "15m", now - CHART_LOOKBACK_MS, now),
+      candles(this.coin, "1m", now - MAX_MINUTE_BARS * MINUTE_MS, now),
+    ]);
+    this.chart.seed(m15, "15m");
+    this.chart.seed(m1, "1m");
+  }
+
+  private async pullCloses(tf: HigherTf, bars: number, now: number): Promise<number[]> {
+    const rows = await candles(this.coin, tf, now - bars * BAR_MS[tf], now);
+    return rows.map((r) => r.close);
+  }
+
   private async snapshot() {
-    const res = await fetch(INFO_URL(config.hlTestnet), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "l2Book", coin: this.coin }),
+    const data = await info<{ levels?: [{ px: string; sz: string }[], { px: string; sz: string }[]] }>({
+      type: "l2Book",
+      coin: this.coin,
     });
-    if (!res.ok) throw new Error(`hl l2Book HTTP ${res.status}`);
-    const data = (await res.json()) as { levels?: [{ px: string; sz: string }[], { px: string; sz: string }[]] };
     if (!data.levels) return;
     const next = bookFromLevels(this.tick, data.levels[0] ?? [], data.levels[1] ?? []);
     if (next) this.book = next;
@@ -83,7 +93,7 @@ export class Feed {
 
   private openSocket(delay = 0) {
     setTimeout(() => {
-      const ws = new WebSocket(WS_URL(config.hlTestnet));
+      const ws = new WebSocket(WS_URL());
       this.ws = ws;
       ws.onopen = () => {
         this.send({ method: "subscribe", subscription: { type: "l2Book", coin: this.coin, fast: true } });
@@ -183,13 +193,7 @@ export class Feed {
   }
 
   private async pollAssetCtx() {
-    const res = await fetch(INFO_URL(config.hlTestnet), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "metaAndAssetCtxs" }),
-    });
-    if (!res.ok) return;
-    const pair = (await res.json()) as [{ universe?: { name?: string }[] }, unknown[]];
+    const pair = await info<[{ universe?: { name?: string }[] }, unknown[]]>({ type: "metaAndAssetCtxs" });
     if (!Array.isArray(pair) || pair.length < 2) return;
     const uni = pair[0]?.universe;
     const ctxs = pair[1];
@@ -199,13 +203,10 @@ export class Feed {
   }
 
   private async pollTrades() {
-    const res = await fetch(INFO_URL(config.hlTestnet), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "recentTrades", coin: this.coin }),
+    const prints = await info<{ px: string; sz: string; side: string; tid?: number }[]>({
+      type: "recentTrades",
+      coin: this.coin,
     });
-    if (!res.ok) return;
-    const prints = (await res.json()) as { px: string; sz: string; side: string; tid?: number }[];
     if (!Array.isArray(prints)) return;
     for (const t of prints) this.ingestPrint(t);
   }

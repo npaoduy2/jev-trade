@@ -11,7 +11,7 @@ I built a trading bot with Jev. Jev reads the Hyperliquid book every tick and an
 
 Jev makes the call. Hold is one of its answers, so a tick can end with no order. Position, balance, and PnL come from Hyperliquid.
 
-Based on [jev-trader](https://github.com/jarrodwatts/jev-trader) by Jarrod Watts (MIT). Venue is Hyperliquid, not Monad / Kuru.
+Based on [jev-trader](https://github.com/jarrodwatts/jev-trader) by Jarrod Watts (MIT). Venue is Hyperliquid or OKX, not Monad / Kuru.
 
 ## What you are looking at
 
@@ -26,11 +26,33 @@ A live key on testnet or mainnet sends real orders. Start with a dry run.
 
 1. The bot reads the book.
 2. Jev picks long or short, then open, close, or hold.
-3. An entry is a post-only Alo quote one tick inside the touch, so it sits on the maker side until a taker hits it.
+3. An entry is a post-only quote one tick inside the touch, so it sits on the maker side until a taker hits it. Alo on Hyperliquid, `post_only` on OKX.
 4. An exit is an Ioc that crosses the touch and fills on the spot.
 5. Hold sends no order and pulls any resting quote Jev no longer wants.
 
 The bot is Bun on port 3000. The dashboard is Next in `web/` on port 3001. Keys, evaluate, and orders stay on the Bun process.
+
+## Venue
+
+`VENUE` picks the exchange. Both are USD perps, and Jev is shown the same fields either way.
+
+| | `hyperliquid` (default) | `okx` |
+| --- | --- | --- |
+| Contract | `BTC-USD` perp | `BTC-USDT-SWAP` |
+| Paper venue | `HL_TESTNET=true` | `OKX_DEMO=true` |
+| Credential | `PRIVATE_KEY`, one wallet per sleeve if you want | `OKX_API_KEY` + secret + passphrase, one account for all sleeves |
+| Order handle | numeric oid | string ordId |
+| Fill link | explorer transaction | none, the exchange keeps its own ledger |
+
+```sh
+VENUE=okx OKX_DEMO=true bun run start
+```
+
+OKX sizes a swap order in contracts of `ctVal` coins, not in coins. That conversion lives in `src/okx/instrument.ts` and nowhere else: the rest of the desk, and everything Jev reads, counts coins. Demo trading is a separate exchange with its own book and its own contract specs, so it quotes a finer tick on BTC than live does.
+
+The OKX account has to be in **net** position mode and out of **Simple** account mode. The bot sets net mode at startup when it can, and says so plainly when it cannot.
+
+Adding a venue means one feed and one market under `src/<venue>/`, wired into `src/venues.ts`. `src/venue.ts` holds the contract both sides answer to.
 
 ## Dry run
 
@@ -99,13 +121,17 @@ See [`.env.example`](.env.example). The ones that change behavior:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `HL_COINS` | `BTC,ETH,SOL,DOGE,BNB` | Sleeves to run |
-| `HL_TESTNET` | `true` | `false` is mainnet |
+| `VENUE` | `hyperliquid` | `okx` trades the USDT swap instead |
+| `COINS` | `BTC,ETH,SOL,DOGE,BNB` | Sleeves to run. `HL_COINS` is the old name |
+| `HL_TESTNET` | `true` | Hyperliquid: `false` is mainnet |
+| `OKX_DEMO` | `true` | OKX: `false` is real money |
+| `OKX_API_KEY` | empty | OKX key, with `OKX_API_SECRET` and `OKX_PASSPHRASE`. Empty is a dry run |
+| `OKX_QUOTE_CCY` | `USDT` | Settlement currency of the swap |
 | `MODEL` | `mock` | `jev` needs a TypeSafe or Gateway key |
 | `JEV_PROVIDER` | `typesafe` | `typesafe` or `gateway` |
 | `TYPESAFE_API_KEY` | empty | Official TypeSafe key |
 | `AI_GATEWAY_API_KEY` | empty | Vercel AI Gateway key |
-| `PRIVATE_KEY` | empty | First coin. Empty is a dry run |
+| `PRIVATE_KEY` | empty | Hyperliquid signer. Empty is a dry run |
 | `DRY_RUN` | `false` | `true` simulates every sleeve |
 | `TICK_MS` | `2000` | Decision + requote cadence |
 | `PRICE_MS` | `200` | Chart and mid prints. Does not call Jev |
@@ -124,6 +150,9 @@ See [`.env.example`](.env.example). The ones that change behavior:
 
 ```
 src/           Bun bot
+src/venue.ts   what a venue has to answer to
+src/hl/        Hyperliquid feed, market, account
+src/okx/       OKX feed, market, account, contract sizing
 test/          bun tests
 web/           Next dashboard
 assets/        README shots of the live desk

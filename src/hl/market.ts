@@ -1,20 +1,28 @@
 import { ApiRequestError, ExchangeClient, HttpTransport, InfoClient } from "@nktkas/hyperliquid";
 import { formatPrice, formatSize, SymbolConverter } from "@nktkas/hyperliquid/utils";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
-import { config } from "./config";
-import type { HigherTf } from "./timeframes";
-import { accountFromClearinghouse, fillDir, FillPnlBook, spotUsdc, type ClearinghouseLike, type FillPnlLike, type SpotStateLike, type SpotUsdc, type VenueAccount } from "./account";
-import { quotePrice, takerPrice } from "./book";
-import type { Feed } from "./feed";
-import { sameCoin, type SleeveConfig } from "./sleeves";
-import type { Book, Fill, Quote, Side } from "./types";
+import { config } from "../config";
+import type { HigherTf } from "../timeframes";
+import { FillPnlBook, type FillPnlLike, type VenueAccount } from "../account";
+import { accountFromClearinghouse, fillDir, spotUsdc, type ClearinghouseLike, type SpotStateLike, type SpotUsdc } from "./account";
+import { gridFromTick, quotePrice, takerPrice, type PriceGrid } from "../book";
+import { sameCoin, type SleeveConfig } from "../sleeves";
+import type { Book, OrderId, Quote, Side } from "../types";
+import type { VenueFillPrint, VenueMarket } from "../venue";
+import type { HlFeed } from "./feed";
+import { info } from "./rest";
 
 type Ex = ExchangeClient;
 
 type QuoteBase = Required<Pick<Quote, "side" | "reduceOnly" | "capped" | "taker">>;
 
+/** Hyperliquid's perp tick: 10^-(6 - szDecimals). BTC szDecimals=5 => 0.1. */
+export function hlGrid(szDecimals: number): PriceGrid {
+  return gridFromTick(10 ** -Math.max(0, 6 - szDecimals));
+}
+
 /** Hyperliquid perp: Alo post-only quotes, modify when the side stays put. */
-export class Market {
+export class HlMarket implements VenueMarket {
   readonly wallet: PrivateKeyAccount | null;
   readonly coin: string;
   readonly pair: string;
@@ -22,11 +30,12 @@ export class Market {
   margin = { usdc: 0 };
   account: VenueAccount | null = null;
   szDecimals = 5;
+  grid: PriceGrid = hlGrid(5);
   maxLeverage = 50;
   /** Venue fee rates, read at init. Defaults are the standard tier. */
   takerFeeBps = 4.5;
   makerFeeBps = 1.5;
-  private info: InfoClient;
+  private infoClient: InfoClient;
   private ex: Ex | null = null;
   private assetId = 0;
   private lastOid: number | null = null;
@@ -38,8 +47,16 @@ export class Market {
   private lastCh: ClearinghouseLike | null = null;
   /** Shared collateral pool. Kept across clearinghouse pushes so equity does not flap. */
   private spot: SpotUsdc | null = null;
-  readonly fillPrints: { ts: number; side: Side; price: number; size: number; dir?: Fill["dir"]; hash?: string }[] = [];
-  onVenueFill: ((fill: { ts: number; side: Side; price: number; size: number; dir?: Fill["dir"]; hash?: string }) => void) | null = null;
+  readonly fillPrints: VenueFillPrint[] = [];
+  onVenueFill: ((fill: VenueFillPrint) => void) | null = null;
+
+  get liveKey() {
+    return this.wallet != null;
+  }
+
+  get sizeDecimals() {
+    return this.szDecimals;
+  }
 
   get chartPoints() {
     return this.feed.chart.points;
@@ -58,13 +75,13 @@ export class Market {
     return this.feed.tfs.series(tf);
   }
 
-  constructor(private feed: Feed, sleeve: SleeveConfig) {
+  constructor(private feed: HlFeed, sleeve: SleeveConfig) {
     this.coin = sleeve.coin;
     this.pair = sleeve.pair;
     this.label = sleeve.label;
-    this.wallet = config.dryRun || !sleeve.privateKey ? null : privateKeyToAccount(sleeve.privateKey);
+    this.wallet = config.dryRun || !sleeve.privateKey ? null : privateKeyToAccount(sleeve.privateKey as `0x${string}`);
     const transport = new HttpTransport({ isTestnet: config.hlTestnet });
-    this.info = new InfoClient({ transport });
+    this.infoClient = new InfoClient({ transport });
     if (this.wallet) this.ex = new ExchangeClient({ transport, wallet: this.wallet });
   }
 
@@ -92,6 +109,7 @@ export class Market {
     if (assetId == null || szDecimals == null) throw new Error(`unknown Hyperliquid coin ${this.coin}`);
     this.assetId = assetId;
     this.szDecimals = szDecimals;
+    this.grid = hlGrid(szDecimals);
     if (this.wallet && this.ex) {
       this.feed.onClearinghouse = (state) => this.applyClearinghouse(state);
       this.feed.onSpotState = (state) => this.applySpot(state);
@@ -107,13 +125,13 @@ export class Market {
     await this.refresh();
     if (this.address) await this.seedFills();
     const net = config.hlTestnet ? "testnet" : "mainnet";
-    console.log(`hyperliquid · ${this.pair} ${net} · ${this.coin} asset ${this.assetId} · szDecimals ${this.szDecimals} · max ${this.maxLeverage}x · ${config.dryRun ? "DRY RUN" : `wallet ${this.address}`}`);
+    console.log(`hyperliquid ${this.pair} ${net} ${this.coin} asset ${this.assetId} szDecimals ${this.szDecimals} max ${this.maxLeverage}x ${config.dryRun ? "DRY RUN" : `wallet ${this.address}`}`);
     if (this.wallet) {
       const a = this.account;
       const side = !a || !a.positionSz ? "flat" : a.positionSz > 0 ? "long" : "short";
       const size = a ? Math.abs(a.positionSz) : 0;
       const entry = a?.entryPrice != null ? ` @ ${a.entryPrice}` : "";
-      console.log(`${this.label} · equity $${(a?.accountValue ?? 0).toFixed(2)} · available $${this.margin.usdc.toFixed(2)} · perps $${(a?.perpsValue ?? 0).toFixed(2)} · ${side} ${size} ${this.coin}${entry}`);
+      console.log(`${this.label} equity $${(a?.accountValue ?? 0).toFixed(2)} available $${this.margin.usdc.toFixed(2)} perps $${(a?.perpsValue ?? 0).toFixed(2)} ${side} ${size} ${this.coin}${entry}`);
     }
   }
 
@@ -121,13 +139,10 @@ export class Market {
   private async loadFees() {
     if (!this.wallet) return;
     try {
-      const res = await fetch(config.hlTestnet ? "https://api.hyperliquid-testnet.xyz/info" : "https://api.hyperliquid.xyz/info", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ type: "userFees", user: this.wallet.address }),
+      const f = await info<{ userCrossRate?: string; userAddRate?: string }>({
+        type: "userFees",
+        user: this.wallet.address,
       });
-      if (!res.ok) return;
-      const f = (await res.json()) as { userCrossRate?: string; userAddRate?: string };
       const cross = Number(f.userCrossRate), add = Number(f.userAddRate);
       if (Number.isFinite(cross) && cross >= 0) this.takerFeeBps = cross * 10_000;
       if (Number.isFinite(add) && add >= 0) this.makerFeeBps = add * 10_000;
@@ -141,10 +156,10 @@ export class Market {
    * `cancelResting` only knows the id it last saw, and a partial fill reports
    * `filled` on orderUpdates, which drops that id while the remainder rests on.
    */
-  async cancelOpen(): Promise<number[]> {
+  async cancelOpen(): Promise<OrderId[]> {
     if (!this.wallet || !this.ex) return [];
     try {
-      const opens = await this.info.openOrders({ user: this.wallet.address });
+      const opens = await this.infoClient.openOrders({ user: this.wallet.address });
       const mine = opens.filter((o) => sameCoin(o.coin, this.coin));
       if (!mine.length) return [];
       await this.ex.cancel({ cancels: mine.map((o) => ({ a: this.assetId, o: o.oid })) });
@@ -187,7 +202,7 @@ export class Market {
       const hash = typeof fill.hash === "string" && fill.hash ? fill.hash : undefined;
       const closedPnl = Number(fill.closedPnl);
       const feeUsd = Number(fill.fee);
-      const print = {
+      const print: VenueFillPrint = {
         ts,
         side,
         price,
@@ -205,7 +220,7 @@ export class Market {
   private async seedFills() {
     if (!this.address) return;
     try {
-      const fills = await this.info.userFills({ user: this.address });
+      const fills = await this.infoClient.userFills({ user: this.address });
       for (const f of fills) this.noteFill(f);
     } catch {
       // keep whatever WS has already delivered
@@ -216,8 +231,8 @@ export class Market {
     const user = this.address;
     if (!user) return;
     const [ch, spot] = await Promise.allSettled([
-      this.info.clearinghouseState({ user }),
-      this.info.spotClearinghouseState({ user }),
+      this.infoClient.clearinghouseState({ user }),
+      this.infoClient.spotClearinghouseState({ user }),
     ]);
     // Spot first so the clearinghouse recompute already sees the pool.
     if (spot.status === "fulfilled") {
@@ -248,24 +263,24 @@ export class Market {
   }
 
   /** Entries rest post-only. Exits cross as Ioc so they do not wait on a taker. */
-  async send(side: Side, sizeSz: number, book: Book, cancel: number[], reduceOnly = false, taker = false): Promise<Quote> {
+  async send(side: Side, sizeSz: number, book: Book, cancel: OrderId[], reduceOnly = false, taker = false): Promise<Quote> {
     const size = lot(sizeSz, this.szDecimals);
     const base: QuoteBase = { side, reduceOnly, capped: false, taker };
     if (size <= 0) {
       return { ...base, price: 0, size: 0, txHash: null, cancel, status: "reverted", orderId: null };
     }
     const px = taker
-      ? Number(formatPrice(takerPrice(side, book, this.szDecimals), this.szDecimals))
+      ? Number(formatPrice(takerPrice(side, book, this.grid), this.szDecimals))
       : this.restingPx(side, book);
     if (!this.ex) {
       return { ...base, price: px, size, txHash: null, cancel, status: "sim", orderId: null };
     }
-    return taker ? this.sendTaker(size, px, base) : this.sendMaker(size, px, cancel, base);
+    return taker ? this.sendTaker(size, px, base) : this.sendMaker(size, px, oids(cancel), base);
   }
 
   /** Post-only price, clamped so it can never cross and get rejected. */
   private restingPx(side: Side, book: Book): number {
-    let px = Number(formatPrice(quotePrice(side, book, this.szDecimals), this.szDecimals));
+    let px = Number(formatPrice(quotePrice(side, book, this.grid), this.szDecimals));
     if (side === "sell" && px <= book.bid) px = Number(formatPrice(book.ask, this.szDecimals));
     if (side === "buy" && px >= book.ask) px = Number(formatPrice(book.bid, this.szDecimals));
     return px;
@@ -285,7 +300,7 @@ export class Market {
   private async sendTaker(size: number, px: number, base: QuoteBase): Promise<Quote> {
     // The standing entry sits on the far side of an exit. Pull it before crossing.
     const open = this.lastOid;
-    const cancel = open != null ? [open] : [];
+    const cancel: OrderId[] = open != null ? [open] : [];
     if (open != null) {
       await this.ex!.cancel({ cancels: [{ a: this.assetId, o: open }] }).catch(() => {});
       this.forgetResting();
@@ -336,9 +351,9 @@ export class Market {
         return { ...base, price: px, size, txHash: null, cancel: [], status: "placed", orderId: this.lastOid };
       }
 
-      const oids = this.lastOid != null ? [this.lastOid] : cancel.filter((id) => id > 0);
-      if (oids.length) {
-        await this.ex!.cancel({ cancels: oids.map((o) => ({ a: this.assetId, o })) }).catch(() => {});
+      const open = this.lastOid != null ? [this.lastOid] : cancel.filter((id) => id > 0);
+      if (open.length) {
+        await this.ex!.cancel({ cancels: open.map((o) => ({ a: this.assetId, o })) }).catch(() => {});
         this.lastOid = null;
       }
 
@@ -350,14 +365,14 @@ export class Market {
         this.lastPrice = px;
         this.lastSize = size;
         this.lastReduce = reduceOnly;
-        return { ...base, price: px, size, txHash: null, cancel: oids, status: "placed", orderId: this.lastOid };
+        return { ...base, price: px, size, txHash: null, cancel: open, status: "placed", orderId: this.lastOid };
       }
       if (st && typeof st === "object" && "filled" in st) {
         this.forgetResting();
-        return { ...base, price: px, size, txHash: null, cancel: oids, status: "placed", orderId: st.filled.oid };
+        return { ...base, price: px, size, txHash: null, cancel: open, status: "placed", orderId: st.filled.oid };
       }
       this.forgetResting();
-      return { ...base, price: px, size, txHash: null, cancel: oids, status: "reverted", orderId: null };
+      return { ...base, price: px, size, txHash: null, cancel: open, status: "reverted", orderId: null };
     } catch (e) {
       this.warn("quote", e);
       return { ...base, price: px, size, txHash: null, cancel, status: "reverted", orderId: this.lastOid };
@@ -365,7 +380,7 @@ export class Market {
   }
 
   /** Pull the standing quote. A resting order Jev no longer wants still gets hit. */
-  async cancelResting(): Promise<number[]> {
+  async cancelResting(): Promise<OrderId[]> {
     const oid = this.lastOid;
     if (!this.ex || oid == null) return [];
     await this.ex.cancel({ cancels: [{ a: this.assetId, o: oid }] }).catch(() => {});
@@ -389,12 +404,7 @@ export class Market {
 
   private async loadMaxLeverage() {
     try {
-      const res = await fetch(config.hlTestnet ? "https://api.hyperliquid-testnet.xyz/info" : "https://api.hyperliquid.xyz/info", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ type: "meta" }),
-      });
-      const meta = (await res.json()) as { universe?: { name?: string; maxLeverage?: number }[] };
+      const meta = await info<{ universe?: { name?: string; maxLeverage?: number }[] }>({ type: "meta" });
       const n = Number(meta.universe?.find((u) => u.name === this.coin)?.maxLeverage);
       if (Number.isFinite(n) && n >= 1) this.maxLeverage = Math.floor(n);
     } catch {
@@ -403,28 +413,9 @@ export class Market {
   }
 }
 
-/**
- * Whether a repeated stop signal means stop waiting on the venue. A process
- * manager can send the same signal twice in one breath, which is not a person
- * pressing again because the exit is taking too long.
- */
-export function repeatMeansGiveUp(firstAt: number, now: number, graceMs = 1_000): boolean {
-  return firstAt > 0 && now - firstAt >= graceMs;
-}
-
-/**
- * Pull every order this process left resting. Returns the ids it cancelled, or
- * null when the venue did not answer in time. One sleeve failing does not stop
- * the rest: a stuck cancel must not strand the others on the book.
- */
-export async function pullResting(
-  markets: { cancelOpen(): Promise<number[]> }[],
-  timeoutMs: number,
-): Promise<number[] | null> {
-  const all = Promise.all(markets.map((m) => m.cancelOpen().catch(() => [] as number[])));
-  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs));
-  const done = await Promise.race([all, timeout]);
-  return done == null ? null : done.flat();
+/** Hyperliquid order handles are numbers. Anything else came from a sim fill. */
+function oids(ids: OrderId[]): number[] {
+  return ids.filter((id): id is number => typeof id === "number");
 }
 
 function lot(raw: number, szDecimals: number): number {

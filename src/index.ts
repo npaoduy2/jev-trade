@@ -1,11 +1,11 @@
 import { config } from "./config";
-import { Feed } from "./feed";
-import { Market, pullResting, repeatMeansGiveUp } from "./market";
 import { createModel } from "./model";
 import { loadSleeves } from "./sleeves";
 import { startServer, type SleeveView } from "./server";
 import { Trader } from "./trader";
-import type { BlockEvent, Fill, Meta, Quote, Timing } from "./types";
+import type { BlockEvent, Book, Fill, Meta, Quote, Timing } from "./types";
+import { pullResting, repeatMeansGiveUp, type VenueFillPrint, type VenueMarket } from "./venue";
+import { createSleeve, isDryRun } from "./venues";
 
 const specs = loadSleeves();
 if (!specs.length) throw new Error("no sleeves");
@@ -15,10 +15,10 @@ const first = specs[0]!;
 const meta: Meta = {
   model: config.model,
   wallet: null,
-  dryRun: config.dryRun || specs.every((s) => !s.privateKey),
+  dryRun: isDryRun(specs),
   market: first.pair,
   startedAt: Date.now(),
-  venue: "hyperliquid",
+  venue: config.venue,
   coin: first.coin,
   pair: first.pair,
   explorerTx: config.explorerTx,
@@ -28,14 +28,14 @@ const meta: Meta = {
 
 let server: ReturnType<typeof startServer> | undefined;
 const starters: Array<() => void> = [];
-const markets: Market[] = [];
+const markets: VenueMarket[] = [];
 
 for (const spec of specs) {
   let lastErr: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const feed = new Feed(spec.coin);
-      feed.onPrice = (book) => {
+      const { feed, market } = createSleeve(spec);
+      feed.onPrice = (book: Book) => {
         server?.broadcastPrice(spec.coin, {
           ts: Date.now(),
           mid: book.mid,
@@ -46,7 +46,6 @@ for (const spec of specs) {
         });
       };
       await feed.connect();
-      const market = new Market(feed, spec);
       await market.init();
       const trader = new Trader(
         market,
@@ -56,7 +55,7 @@ for (const spec of specs) {
         onQuote(spec.coin),
       );
       trader.attachTradeFeed(feed.trades);
-      market.onVenueFill = (p) => {
+      market.onVenueFill = (p: VenueFillPrint) => {
         server?.broadcastFill(spec.coin, 0, {
           side: p.side,
           size: p.size,
@@ -76,8 +75,8 @@ for (const spec of specs) {
         meta.pair = spec.pair;
         meta.market = spec.pair;
       }
-      starters.push(() => feed.start((tick) => trader.onBlock(tick)));
-      console.log(`sleeve ${spec.label} ${spec.pair} ${config.dryRun || !spec.privateKey ? "DRY RUN" : market.address}`);
+      starters.push(() => feed.start((tick: number) => trader.onBlock(tick)));
+      console.log(`sleeve ${spec.label} ${spec.pair} ${market.liveKey ? market.address : "DRY RUN"}`);
       lastErr = null;
       break;
     } catch (e) {
@@ -93,7 +92,7 @@ if (!views.length) throw new Error("no sleeves started");
 server = startServer(meta, views);
 for (const start of starters) start();
 
-console.log(`jev-trade ${meta.sleeves.map((s) => s.label).join(" ")} model=${meta.model}${config.model === "jev" ? ` ${config.jevProvider}` : ""} tick ${config.tickMs}ms price ${config.priceMs}ms quote $${config.quoteUsd}/x cap $${config.maxNotionalUsd} :${config.port}`);
+console.log(`jev-trade ${config.venue} ${meta.sleeves.map((s) => s.label).join(" ")} model=${meta.model}${config.model === "jev" ? ` ${config.jevProvider}` : ""} tick ${config.tickMs}ms price ${config.priceMs}ms quote $${config.quoteUsd}/x cap $${config.maxNotionalUsd} :${config.port}`);
 
 /** A resting entry outlives the process that placed it, so pull it on the way out. */
 const SHUTDOWN_MS = 5_000;

@@ -1,15 +1,10 @@
-import { config } from "./config";
-
-const INFO_URL = (testnet: boolean) =>
-  testnet ? "https://api.hyperliquid-testnet.xyz/info" : "https://api.hyperliquid.xyz/info";
-
 /** Pulled over REST. 1m already arrives live on the candle socket. */
 export const HIGHER_TFS = ["15m", "1h", "4h", "1d"] as const;
 export type HigherTf = (typeof HIGHER_TFS)[number];
 export type Timeframe = "1m" | HigherTf;
 export const TIMEFRAMES: Timeframe[] = ["1m", ...HIGHER_TFS];
 
-const BAR_MS: Record<Timeframe, number> = {
+export const BAR_MS: Record<Timeframe, number> = {
   "1m": 60_000,
   "15m": 15 * 60_000,
   "1h": 60 * 60_000,
@@ -17,9 +12,12 @@ const BAR_MS: Record<Timeframe, number> = {
   "1d": 24 * 60 * 60_000,
 };
 
-/** The venue caps a candleSnapshot near this, which is enough for an ema200. */
-const BARS = 500;
+/** Venues cap one candle request near this, which is enough for an ema200. */
+export const BARS = 500;
 const REFRESH_MS = 5 * 60_000;
+
+/** Closes for one interval, oldest first. The venue owns the request. */
+export type ClosePuller = (tf: HigherTf, bars: number, now: number) => Promise<number[]>;
 
 /**
  * Closes per venue interval, deliberately outside `VenueChart`. The dashboard
@@ -29,6 +27,8 @@ const REFRESH_MS = 5 * 60_000;
 export class Timeframes {
   private closes = new Map<HigherTf, number[]>();
   private pulledAt = new Map<HigherTf, number>();
+
+  constructor(private pull: ClosePuller) {}
 
   series(tf: HigherTf): number[] {
     return this.closes.get(tf) ?? [];
@@ -43,27 +43,12 @@ export class Timeframes {
 
   async refresh(coin: string, now = Date.now()): Promise<void> {
     const due = HIGHER_TFS.filter((tf) => now - (this.pulledAt.get(tf) ?? 0) >= REFRESH_MS);
-    await Promise.all(due.map((tf) => this.pull(coin, tf, now)));
+    await Promise.all(due.map((tf) => this.pullOne(coin, tf, now)));
   }
 
-  private async pull(coin: string, tf: HigherTf, now: number): Promise<void> {
+  private async pullOne(coin: string, tf: HigherTf, now: number): Promise<void> {
     try {
-      const res = await fetch(INFO_URL(config.hlTestnet), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          type: "candleSnapshot",
-          req: { coin, interval: tf, startTime: now - BARS * BAR_MS[tf], endTime: now },
-        }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const rows = (await res.json()) as unknown;
-      if (!Array.isArray(rows)) return;
-      const closes: number[] = [];
-      for (const row of rows) {
-        const c = Number((row as { c?: unknown })?.c);
-        if (Number.isFinite(c) && c > 0) closes.push(c);
-      }
+      const closes = await this.pull(tf, BARS, now);
       // A short answer is still better than dropping the series entirely.
       if (closes.length) this.closes.set(tf, closes);
       this.pulledAt.set(tf, now);

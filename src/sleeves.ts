@@ -1,8 +1,13 @@
 import { existsSync, readFileSync } from "node:fs";
-import { hexKey } from "./config";
+import { config, hexKey, resolveCoins, type OkxCredentials } from "./config";
+import type { VenueName } from "./venue";
 
-export function coinPair(coin: string): string {
-  return `${coin}-USD`;
+/**
+ * What the venue calls the contract for one coin. Hyperliquid names its perp
+ * after the coin; OKX names the USDT-margined swap `BTC-USDT-SWAP`.
+ */
+export function coinPair(coin: string, venue: VenueName = config.venue, quoteCcy = config.okxQuoteCcy): string {
+  return venue === "okx" ? `${coin}-${quoteCcy}-SWAP` : `${coin}-USD`;
 }
 
 export function sameCoin(a: string | undefined, b: string): boolean {
@@ -13,7 +18,10 @@ export interface SleeveConfig {
   coin: string;
   pair: string;
   label: string;
+  /** Hyperliquid signer. Absent means a dry run for that sleeve. */
   privateKey?: string;
+  /** OKX key set. One key backs every sleeve, as one account holds every position. */
+  okx?: OkxCredentials;
 }
 
 type WalletFile = { sleeves?: { coin?: string; privateKey?: string }[] };
@@ -59,15 +67,16 @@ function loadWalletKeys(): Map<string, string> {
 }
 
 /**
- * One Hyperliquid account holds a position in every perp at once, so PRIVATE_KEY
- * backs all the listed coins. A per-coin key in WALLETS_JSON or `.wallets.json`
- * overrides it for that coin.
+ * One account holds a position in every perp at once, so one key set backs all
+ * the listed coins. On Hyperliquid a per-coin key in WALLETS_JSON or
+ * `.wallets.json` overrides PRIVATE_KEY for that coin.
  */
-export function loadSleeves(): SleeveConfig[] {
-  const listed = (process.env.HL_COINS ?? "BTC,ETH,SOL,DOGE,BNB")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+export function loadSleeves(venue: VenueName = config.venue): SleeveConfig[] {
+  const listed = resolveCoins(process.env);
+  if (venue === "okx") {
+    const okx = config.okx ?? undefined;
+    return listed.map((coin) => ({ coin, pair: coinPair(coin, venue), label: coin, okx }));
+  }
   const file = loadWalletKeys();
   const source = process.env.PRIVATE_KEY;
   return listed.map((coin) => {
@@ -75,7 +84,7 @@ export function loadSleeves(): SleeveConfig[] {
     const privateKey = fromFile ?? source;
     return {
       coin,
-      pair: coinPair(coin),
+      pair: coinPair(coin, venue),
       label: coin,
       privateKey: privateKey ? hexKey(privateKey) : undefined,
     };

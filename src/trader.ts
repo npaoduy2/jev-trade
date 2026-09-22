@@ -1,11 +1,11 @@
 import { config } from "./config";
 import { bpsBetween, snapshotIndicators, venueFeatures } from "./indicators";
 import { HIGHER_TFS } from "./timeframes";
-import type { Market } from "./market";
+import { isVenueOrderId, type VenueMarket } from "./venue";
 import type { Model, ModelDecision, TradeState } from "./model";
 import { leverageRungs, planQuote, type QuotePlan } from "./plan";
 import { aggregateFills, emptySummary, takeLiveFills, takeSimFills, type FlowWindow, type Resting, type TradeFeed } from "./trades";
-import type { BlockEvent, Book, Fill, PricePoint, Quote, Side, Timing, Totals } from "./types";
+import type { BlockEvent, Book, Fill, OrderId, PricePoint, Quote, Side, Timing, Totals } from "./types";
 
 const emptyTotals = (): Totals => ({
   blocks: 0, decisions: 0, quotes: 0, fills: 0, reverted: 0, lateBlocks: 0,
@@ -34,7 +34,7 @@ export class Trader {
   private busy = false;
   private lastBook: Book | null = null;
   private trades: TradeFeed | null = null;
-  private orders = new Map<number, Resting>();
+  private orders = new Map<OrderId, Resting>();
   private simId = 0;
   private sendSeq = 0;
   private exchangeTail: Promise<void> = Promise.resolve();
@@ -49,7 +49,7 @@ export class Trader {
   private track: { openedAt: number; peak: number; peakAt: number; path: number[] } | null = null;
 
   constructor(
-    private market: Market,
+    private market: VenueMarket,
     private model: Model,
     private onEvent: (e: BlockEvent, timing?: Timing) => void,
     private onFill: (block: number, fill: Fill) => void = () => {},
@@ -146,7 +146,7 @@ export class Trader {
         await this.market.setLeverage(decision.leverage);
         if (seq !== this.sendSeq) return;
       }
-      const cancel = [...this.orders.keys()].filter((id) => id > 0);
+      const cancel = [...this.orders.keys()].filter(isVenueOrderId);
       // Price against the touch as it is now, not as it was before Jev answered.
       // A post-only order priced off a book that aged through the decision and
       // the leverage write gets rejected for crossing.
@@ -216,7 +216,7 @@ export class Trader {
   private harvest() {
     if (!this.trades) return;
     const prints = this.trades.drainPrints();
-    const fills = this.market.wallet ? takeLiveFills(this.orders, this.trades.drainFills()) : takeSimFills(this.orders, prints);
+    const fills = this.market.liveKey ? takeLiveFills(this.orders, this.trades.drainFills()) : takeSimFills(this.orders, prints);
     if (!fills.length) return;
     const byBlock = new Map<number, Fill[]>();
     for (const f of fills) {
@@ -303,6 +303,7 @@ export class Trader {
     return {
       coin: this.market.coin,
       market: this.market.pair,
+      venue: config.venue,
       tick: block,
       tickMs: config.tickMs,
       mid: book.mid,
@@ -404,7 +405,7 @@ export class Trader {
         },
       quote,
       fill: null,
-      resting: { bidSz: round(this.restingSz("buy"), this.market.szDecimals), askSz: round(this.restingSz("sell"), this.market.szDecimals) },
+      resting: { bidSz: round(this.restingSz("buy"), this.market.sizeDecimals), askSz: round(this.restingSz("sell"), this.market.sizeDecimals) },
       position: {
         side: this.position.sz > 0 ? "long" : this.position.sz < 0 ? "short" : "flat",
         size,
