@@ -7,8 +7,12 @@ export interface VenueAccount {
   unrealizedUsd: number;
   realizedUsd: number;
   feesUsd: number;
+  /** Unified account equity: the whole USDC collateral pool behind this wallet. */
   accountValue: number;
+  /** Collateral not locked against an open position. */
   withdrawable: number;
+  /** Perps wallet on its own. Only a slice of `accountValue` once a position draws on spot. */
+  perpsValue: number;
   leverage: number | null;
   liquidationPx: number | null;
 }
@@ -26,6 +30,29 @@ export interface ClearinghouseLike {
       liquidationPx?: string;
     };
   }>;
+}
+
+/**
+ * Spot leg of a Hyperliquid wallet. Under unified margin this is the shared collateral
+ * pool: USDC `total` is the account equity and `hold` is the part locked against perps.
+ */
+export interface SpotStateLike {
+  balances?: Array<{ coin?: string; total?: string; hold?: string }>;
+}
+
+export interface SpotUsdc {
+  total: number;
+  hold: number;
+}
+
+/** USDC leg of `spotClearinghouseState`. `null` when the wallet holds no USDC. */
+export function spotUsdc(state: SpotStateLike): SpotUsdc | null {
+  const row = state.balances?.find((b) => b.coin === "USDC");
+  if (!row) return null;
+  const total = Number(row.total ?? Number.NaN);
+  if (!Number.isFinite(total)) return null;
+  const hold = Number(row.hold ?? 0);
+  return { total, hold: Number.isFinite(hold) ? hold : 0 };
 }
 
 export interface FillPnlLike {
@@ -65,14 +92,21 @@ export function accountFromClearinghouse(
   state: ClearinghouseLike,
   coin: string,
   prev?: VenueAccount | null,
+  spot?: SpotUsdc | null,
 ): VenueAccount {
   const pos = state.assetPositions?.find((p) => sameCoin(p.position?.coin, coin))?.position;
   const szi = pos?.szi != null ? Number(pos.szi) : 0;
   const size = Number.isFinite(szi) ? szi : 0;
   const entry = pos?.entryPx != null ? Number(pos.entryPx) : NaN;
   const unreal = pos?.unrealizedPnl != null ? Number(pos.unrealizedPnl) : 0;
-  const accountValue = Number(state.marginSummary?.accountValue ?? 0);
-  const withdrawable = Number(state.withdrawable ?? 0);
+  const perpsValue = Number(state.marginSummary?.accountValue ?? 0);
+  // Hyperliquid runs unified margin on testnet and mainnet alike: spot USDC is the one
+  // collateral pool and already carries perps PnL, so it is the account equity.
+  // marginSummary.accountValue is only the perps slice and reads far too small once a
+  // position draws on spot. No spot USDC means there is nothing to unify with.
+  const unified = spot && Number.isFinite(spot.total) ? spot : null;
+  const accountValue = unified ? unified.total : perpsValue;
+  const withdrawable = unified ? unified.total - unified.hold : Number(state.withdrawable ?? 0);
   const lev = pos?.leverage?.value != null ? Number(pos.leverage.value) : NaN;
   const liq = pos?.liquidationPx != null ? Number(pos.liquidationPx) : NaN;
   return {
@@ -83,6 +117,7 @@ export function accountFromClearinghouse(
     feesUsd: prev?.feesUsd ?? 0,
     accountValue: Number.isFinite(accountValue) ? accountValue : 0,
     withdrawable: Number.isFinite(withdrawable) ? withdrawable : 0,
+    perpsValue: Number.isFinite(perpsValue) ? perpsValue : 0,
     leverage: Number.isFinite(lev) && lev > 0 ? lev : prev?.leverage ?? null,
     liquidationPx: size && Number.isFinite(liq) && liq > 0 ? liq : null,
   };

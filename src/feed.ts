@@ -1,6 +1,6 @@
 import { config } from "./config";
 import type { Book } from "./types";
-import { fillDir, type ClearinghouseLike, type FillPnlLike } from "./account";
+import { fillDir, type ClearinghouseLike, type FillPnlLike, type SpotStateLike } from "./account";
 import { bookFromLevels } from "./book";
 import { CHART_INTERVAL, VenueChart } from "./chart";
 import { parseAssetCtx, type AssetCtx } from "./indicators";
@@ -24,6 +24,7 @@ export class Feed {
   tick = 0;
   onGone: ((oid: number) => void) | null = null;
   onClearinghouse: ((state: ClearinghouseLike) => void) | null = null;
+  onSpotState: ((state: SpotStateLike) => void) | null = null;
   onUserPnl: ((fill: FillPnlLike) => void) | null = null;
   private lastTickAt = 0;
   private lastPriceAt = 0;
@@ -103,6 +104,7 @@ export class Feed {
     this.send({ method: "subscribe", subscription: { type: "userFills", user: this.user } });
     this.send({ method: "subscribe", subscription: { type: "orderUpdates", user: this.user } });
     this.send({ method: "subscribe", subscription: { type: "clearinghouseState", user: this.user } });
+    this.send({ method: "subscribe", subscription: { type: "spotState", user: this.user } });
   }
 
   private send(msg: unknown) {
@@ -160,6 +162,11 @@ export class Feed {
     if (m.channel === "clearinghouseState" && m.data) {
       const state = m.data.clearinghouseState ?? m.data;
       if (state?.assetPositions || state?.marginSummary) this.onClearinghouse?.(state);
+      return;
+    }
+    if (m.channel === "spotState" && m.data) {
+      const state = m.data.spotState ?? m.data;
+      if (state?.balances) this.onSpotState?.(state);
       return;
     }
     if (m.channel === "orderUpdates" && Array.isArray(m.data)) {

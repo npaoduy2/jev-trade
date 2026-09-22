@@ -125,8 +125,9 @@ export interface BlockEvent {
   resting: { bidSz: number; askSz: number };
   position: Position;
   totals: Totals;
-  /** Hyperliquid account equity for this sleeve wallet. */
+  /** Unified account equity for this sleeve wallet: the whole USDC collateral pool. */
   accountValue?: number | null;
+  /** Collateral not locked against an open position. */
   withdrawable?: number | null;
 }
 

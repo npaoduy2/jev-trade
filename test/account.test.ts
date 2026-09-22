@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { accountFromClearinghouse, fillDir, FillPnlBook } from "../src/account";
+import { accountFromClearinghouse, fillDir, FillPnlBook, spotUsdc } from "../src/account";
 
 const state = {
   withdrawable: "546.14",
@@ -56,4 +56,59 @@ test("fillDir maps Hyperliquid dir", () => {
   expect(fillDir("Close Short")).toBe("close");
   expect(fillDir("Long > Short")).toBe("flip");
   expect(fillDir(undefined)).toBeUndefined();
+});
+
+test("spotUsdc reads the USDC leg and ignores other tokens", () => {
+  const got = spotUsdc({
+    balances: [
+      { coin: "TZERO", total: "0.0", hold: "0.0" },
+      { coin: "USDC", total: "996.201236", hold: "3.974952" },
+    ],
+  });
+  expect(got?.total).toBeCloseTo(996.201236, 6);
+  expect(got?.hold).toBeCloseTo(3.974952, 6);
+});
+
+test("spotUsdc is null without a USDC balance", () => {
+  expect(spotUsdc({ balances: [{ coin: "HORSE", total: "1.0" }] })).toBeNull();
+  expect(spotUsdc({})).toBeNull();
+});
+
+test("spotUsdc defaults a missing hold to zero", () => {
+  expect(spotUsdc({ balances: [{ coin: "USDC", total: "10" }] })).toEqual({ total: 10, hold: 0 });
+});
+
+// Live testnet read: the perps leg says $3.37 while the pool behind it holds $996.
+const unifiedState = {
+  withdrawable: "0.0",
+  marginSummary: { accountValue: "3.365182" },
+  assetPositions: [
+    { position: { coin: "BTC", szi: "0.00046", entryPx: "86577.0", unrealizedPnl: "-0.0713" } },
+  ],
+};
+
+test("equity is the spot pool, not the perps slice", () => {
+  const a = accountFromClearinghouse(unifiedState, "BTC", null, { total: 996.201236, hold: 3.974952 });
+  expect(a.accountValue).toBeCloseTo(996.201236, 6);
+  expect(a.withdrawable).toBeCloseTo(992.226284, 6);
+  expect(a.perpsValue).toBeCloseTo(3.365182, 6);
+});
+
+test("a fully held pool leaves nothing available", () => {
+  // Live mainnet read: hold covers the whole balance, so available is zero.
+  const a = accountFromClearinghouse(
+    { withdrawable: "0.0", marginSummary: { accountValue: "13.592196" } },
+    "BTC",
+    null,
+    { total: 13.592196, hold: 13.592196 },
+  );
+  expect(a.accountValue).toBeCloseTo(13.592196, 6);
+  expect(a.withdrawable).toBe(0);
+});
+
+test("without a spot pool the perps wallet still answers", () => {
+  const a = accountFromClearinghouse(state, "BTC");
+  expect(a.accountValue).toBeCloseTo(548.2, 6);
+  expect(a.withdrawable).toBeCloseTo(546.14, 6);
+  expect(a.perpsValue).toBeCloseTo(548.2, 6);
 });

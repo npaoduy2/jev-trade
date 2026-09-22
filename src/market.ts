@@ -2,7 +2,7 @@ import { ApiRequestError, ExchangeClient, HttpTransport, InfoClient } from "@nkt
 import { formatPrice, formatSize, SymbolConverter } from "@nktkas/hyperliquid/utils";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { config } from "./config";
-import { accountFromClearinghouse, fillDir, FillPnlBook, type ClearinghouseLike, type FillPnlLike, type VenueAccount } from "./account";
+import { accountFromClearinghouse, fillDir, FillPnlBook, spotUsdc, type ClearinghouseLike, type FillPnlLike, type SpotStateLike, type SpotUsdc, type VenueAccount } from "./account";
 import { quotePrice, takerPrice } from "./book";
 import type { Feed } from "./feed";
 import { sameCoin, type SleeveConfig } from "./sleeves";
@@ -31,6 +31,9 @@ export class Market {
   private lastSize = 0;
   private lastReduce = false;
   private fills = new FillPnlBook();
+  private lastCh: ClearinghouseLike | null = null;
+  /** Shared collateral pool. Kept across clearinghouse pushes so equity does not flap. */
+  private spot: SpotUsdc | null = null;
   readonly fillPrints: { ts: number; side: Side; price: number; size: number; dir?: Fill["dir"]; hash?: string }[] = [];
   onVenueFill: ((fill: { ts: number; side: Side; price: number; size: number; dir?: Fill["dir"]; hash?: string }) => void) | null = null;
 
@@ -74,6 +77,7 @@ export class Market {
     this.szDecimals = szDecimals;
     if (this.wallet && this.ex) {
       this.feed.onClearinghouse = (state) => this.applyClearinghouse(state);
+      this.feed.onSpotState = (state) => this.applySpot(state);
       this.feed.onUserPnl = (fill) => this.noteFill(fill);
       this.feed.watchUser(this.wallet.address);
       this.feed.onGone = (oid) => {
@@ -91,7 +95,7 @@ export class Market {
       const side = !a || !a.positionSz ? "flat" : a.positionSz > 0 ? "long" : "short";
       const size = a ? Math.abs(a.positionSz) : 0;
       const entry = a?.entryPrice != null ? ` @ ${a.entryPrice}` : "";
-      console.log(`${this.label} · withdrawable $${this.margin.usdc.toFixed(2)} · account $${(a?.accountValue ?? 0).toFixed(2)} · ${side} ${size} ${this.coin}${entry}`);
+      console.log(`${this.label} · equity $${(a?.accountValue ?? 0).toFixed(2)} · available $${this.margin.usdc.toFixed(2)} · perps $${(a?.perpsValue ?? 0).toFixed(2)} · ${side} ${size} ${this.coin}${entry}`);
     }
   }
 
@@ -108,7 +112,21 @@ export class Market {
   }
 
   applyClearinghouse(state: ClearinghouseLike) {
-    this.account = this.fills.apply(accountFromClearinghouse(state, this.coin, this.account));
+    this.lastCh = state;
+    this.recompute();
+  }
+
+  applySpot(state: SpotStateLike) {
+    const next = spotUsdc(state);
+    if (!next) return;
+    this.spot = next;
+    this.recompute();
+  }
+
+  /** Equity needs the perps leg and the spot pool together, and they arrive separately. */
+  private recompute() {
+    if (!this.lastCh) return;
+    this.account = this.fills.apply(accountFromClearinghouse(this.lastCh, this.coin, this.account, this.spot));
     this.margin.usdc = this.account.withdrawable;
   }
 
@@ -150,12 +168,19 @@ export class Market {
   }
 
   async refresh() {
-    if (!this.address) return;
-    try {
-      this.applyClearinghouse(await this.info.clearinghouseState({ user: this.address }));
-    } catch {
-      // keep last balances
+    const user = this.address;
+    if (!user) return;
+    const [ch, spot] = await Promise.allSettled([
+      this.info.clearinghouseState({ user }),
+      this.info.spotClearinghouseState({ user }),
+    ]);
+    // Spot first so the clearinghouse recompute already sees the pool.
+    if (spot.status === "fulfilled") {
+      const next = spotUsdc(spot.value);
+      if (next) this.spot = next;
     }
+    if (ch.status === "fulfilled") this.applyClearinghouse(ch.value);
+    else this.recompute();
   }
 
   readBook(): Book {
