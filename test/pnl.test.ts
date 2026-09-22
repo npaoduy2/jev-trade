@@ -46,3 +46,24 @@ test("roePct is unrealized over initial margin", () => {
   expect(roePct({ side: "flat", size: 0, entryPrice: null, leverage: 10, unrealizedUsd: 0 })).toBeNull();
   expect(roePct({ side: "long", size: 1, entryPrice: 100, leverage: 10, unrealizedUsd: 5 })).toBeCloseTo(0.5);
 });
+
+test("sleeves sharing one wallet report one balance, not one per coin", () => {
+  const idle = event({
+    coin: "BTC",
+    position: { side: "flat", size: 0, entryPrice: null, leverage: 10, unrealizedUsd: 0, unrealizedSz: 0 },
+    totals: {
+      blocks: 1, decisions: 1, quotes: 0, fills: 0, reverted: 0, lateBlocks: 0,
+      jevUsd: 0, gasSz: 0, gasUsd: 0, realizedUsd: 0, pnlUsd: 0, pnlSz: 0, pnlPct: 0,
+    },
+    accountValue: 996.12,
+  });
+  const rows = { BTC: idle, SOL: idle, AAVE: idle };
+  const oneWallet = { BTC: "0xabc", SOL: "0xabc", AAVE: "0xabc" };
+  expect(portfolioBalance(rows, oneWallet)).toBeCloseTo(996.12);
+
+  const split = { BTC: "0xabc", SOL: "0xdef", AAVE: "0xabc" };
+  expect(portfolioBalance(rows, split)).toBeCloseTo(996.12 * 2);
+
+  // No wallet map means the old behaviour, which suits separate accounts.
+  expect(portfolioBalance(rows)).toBeCloseTo(996.12 * 3);
+});

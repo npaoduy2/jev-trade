@@ -58,7 +58,11 @@ function loadWalletKeys(): Map<string, string> {
   return out;
 }
 
-/** First coin can use PRIVATE_KEY. Others use WALLETS_JSON or `.wallets.json`. */
+/**
+ * One Hyperliquid account holds a position in every perp at once, so PRIVATE_KEY
+ * backs all the listed coins. A per-coin key in WALLETS_JSON or `.wallets.json`
+ * overrides it for that coin.
+ */
 export function loadSleeves(): SleeveConfig[] {
   const listed = (process.env.HL_COINS ?? "BTC,ETH,SOL,DOGE,BNB")
     .split(",")
@@ -66,9 +70,9 @@ export function loadSleeves(): SleeveConfig[] {
     .filter(Boolean);
   const file = loadWalletKeys();
   const source = process.env.PRIVATE_KEY;
-  return listed.map((coin, i) => {
+  return listed.map((coin) => {
     const fromFile = file.get(coin);
-    const privateKey = fromFile ?? (i === 0 ? source : undefined);
+    const privateKey = fromFile ?? source;
     return {
       coin,
       pair: coinPair(coin),

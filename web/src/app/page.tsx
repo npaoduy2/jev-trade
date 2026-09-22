@@ -64,7 +64,11 @@ export default function Page() {
   }, [coins, feed.byCoin]);
 
   const pnl = useMemo(() => portfolioPnl(latestByCoin), [latestByCoin]);
-  const balance = useMemo(() => portfolioBalance(latestByCoin), [latestByCoin]);
+  const walletByCoin = useMemo(
+    () => Object.fromEntries((feed.meta?.sleeves ?? []).map((s) => [s.coin, s.wallet])),
+    [feed.meta],
+  );
+  const balance = useMemo(() => portfolioBalance(latestByCoin, walletByCoin), [latestByCoin, walletByCoin]);
   const hasBooks = coins.some((c) => latestByCoin[c]);
   const waiting = !feed.meta;
 

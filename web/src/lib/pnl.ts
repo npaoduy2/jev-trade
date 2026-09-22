@@ -33,16 +33,28 @@ export function portfolioPnl(latestByCoin: Record<string, BlockEvent | null | un
   return { unrealized, realized };
 }
 
-/** Sum of Hyperliquid account equity across sleeve wallets. */
-export function portfolioBalance(latestByCoin: Record<string, BlockEvent | null | undefined>): number | null {
+/**
+ * Hyperliquid equity across the wallets behind the sleeves, counting each wallet
+ * once. Sleeves sharing one account all report that account's equity, so adding
+ * them up multiplies the balance by the number of coins.
+ */
+export function portfolioBalance(
+  latestByCoin: Record<string, BlockEvent | null | undefined>,
+  walletByCoin?: Record<string, string | null | undefined>,
+): number | null {
   let sum = 0;
   let any = false;
-  for (const latest of Object.values(latestByCoin)) {
+  const counted = new Set<string>();
+  for (const [coin, latest] of Object.entries(latestByCoin)) {
     const v = latest?.accountValue;
-    if (typeof v === "number" && Number.isFinite(v)) {
-      sum += v;
-      any = true;
+    if (typeof v !== "number" || !Number.isFinite(v)) continue;
+    const wallet = walletByCoin?.[coin];
+    if (wallet) {
+      if (counted.has(wallet)) continue;
+      counted.add(wallet);
     }
+    sum += v;
+    any = true;
   }
   return any ? sum : null;
 }
