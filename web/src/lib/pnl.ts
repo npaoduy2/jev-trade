@@ -7,26 +7,32 @@ export type SleevePnl = {
   open: boolean;
 };
 
-export function sleevePnl(latest: BlockEvent | null | undefined): SleevePnl {
+export function sleevePnl(latest: BlockEvent | null | undefined, mark?: number | null): SleevePnl {
   const pos = latest?.position;
   const open = Boolean(pos && pos.side !== "flat" && pos.size > 0);
-  const unrealized = open && typeof pos?.unrealizedUsd === "number" && Number.isFinite(pos.unrealizedUsd)
+  const reported = open && typeof pos?.unrealizedUsd === "number" && Number.isFinite(pos.unrealizedUsd)
     ? pos.unrealizedUsd
     : 0;
+  // Reprice only against a live mark. Without one, the venue's own figure stands.
+  const unrealized = open && mark != null && mark > 0 ? unrealizedAt(pos, mark) : reported;
   const realized = typeof latest?.totals?.realizedUsd === "number" && Number.isFinite(latest.totals.realizedUsd)
     ? latest.totals.realizedUsd
     : 0;
   return { coin: latest?.coin ?? "", unrealized, realized, open };
 }
 
-export function portfolioPnl(latestByCoin: Record<string, BlockEvent | null | undefined>): {
+export function portfolioPnl(
+  latestByCoin: Record<string, BlockEvent | null | undefined>,
+  markByCoin?: Record<string, { mid: number; markPx?: number | null } | null | undefined>,
+): {
   unrealized: number;
   realized: number;
 } {
   let unrealized = 0;
   let realized = 0;
-  for (const latest of Object.values(latestByCoin)) {
-    const row = sleevePnl(latest);
+  for (const [coin, latest] of Object.entries(latestByCoin)) {
+    const live = markByCoin?.[coin];
+    const row = sleevePnl(latest, live?.markPx ?? live?.mid ?? null);
     unrealized += row.unrealized;
     realized += row.realized;
   }
@@ -72,4 +78,25 @@ export function roePct(pos: {
   const margin = (pos.size * pos.entryPrice) / lev;
   if (!(margin > 0)) return null;
   return pos.unrealizedUsd / margin;
+}
+
+/**
+ * Unrealized at a given price, by the venue's own arithmetic. Prefer the venue's
+ * mark: it is what prices PnL and liquidation there, and it is not the mid. The
+ * per-tick figure on a BlockEvent is a minute old at a 60s tick, while the price
+ * beside it moves every 200ms.
+ */
+export function unrealizedAt(
+  pos: {
+    side: string;
+    size: number;
+    entryPrice: number | null;
+    unrealizedUsd: number;
+  } | null | undefined,
+  price: number | null | undefined,
+): number {
+  if (!pos || pos.side === "flat" || !(pos.size > 0)) return 0;
+  if (!pos.entryPrice || !(pos.entryPrice > 0) || !price || !(price > 0)) return pos.unrealizedUsd;
+  const move = price - pos.entryPrice;
+  return pos.size * (pos.side === "short" ? -move : move);
 }

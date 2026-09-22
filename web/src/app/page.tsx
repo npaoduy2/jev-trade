@@ -63,7 +63,15 @@ export default function Page() {
     return out;
   }, [coins, feed.byCoin]);
 
-  const pnl = useMemo(() => portfolioPnl(latestByCoin), [latestByCoin]);
+  const markByCoin = useMemo(() => {
+    const out: Record<string, { mid: number; markPx?: number | null } | null> = {};
+    for (const c of coins) {
+      const m = feed.byCoin[c]?.mark;
+      out[c] = m ? { mid: m.mid, markPx: m.markPx } : null;
+    }
+    return out;
+  }, [coins, feed.byCoin]);
+  const pnl = useMemo(() => portfolioPnl(latestByCoin, markByCoin), [latestByCoin, markByCoin]);
   const walletByCoin = useMemo(
     () => Object.fromEntries((feed.meta?.sleeves ?? []).map((s) => [s.coin, s.wallet])),
     [feed.meta],
@@ -108,6 +116,7 @@ export default function Page() {
       <Book
         sleeves={feed.meta?.sleeves ?? []}
         latestByCoin={latestByCoin}
+        markByCoin={markByCoin}
         tapeByCoin={tapeByCoin}
         selected={coin}
         meta={meta}

@@ -41,6 +41,8 @@ export class Trader {
   private jevPauseUntil = 0;
   private lastOi: number | null = null;
   private refreshedAt = 0;
+  /** The entry Jev asked for, kept until it is filled, closed, or stood down. */
+  private entry: { side: Side; target: number } | null = null;
 
   constructor(
     private market: Market,
@@ -100,7 +102,10 @@ export class Trader {
         timing.loopMs = Math.round(performance.now() - t0);
         this.emit(block, book, decision, null, false, timing);
         if (plan) this.enqueueQuote(block, decision, plan, book);
-        else this.enqueueStandDown();
+        // A maker entry fills in pieces. Once any of it lands, the next tick asks
+        // whether to keep the position, and pulling the rest on that answer would
+        // strand Jev at a fraction of the size it asked for.
+        else if (!this.entryWorking()) this.enqueueStandDown();
       } catch (e) {
         const msg = (e as Error).message;
         if (jevUnavailable(e)) {
@@ -118,7 +123,16 @@ export class Trader {
     }
   }
 
+  /** True while a partly filled entry still has size to work, on its own side. */
+  private entryWorking(): boolean {
+    const e = this.entry;
+    if (!e) return false;
+    const filled = e.side === "buy" ? this.position.sz : -this.position.sz;
+    return filled > 1e-9 && filled < e.target - 1e-9;
+  }
+
   private enqueueQuote(block: number, decision: ModelDecision, plan: QuotePlan, book: Book) {
+    this.entry = plan.reduceOnly ? null : { side: plan.side, target: plan.size };
     const seq = ++this.sendSeq;
     this.exchangeTail = this.exchangeTail.catch(() => {}).then(async () => {
       if (seq !== this.sendSeq) return;
@@ -146,6 +160,7 @@ export class Trader {
 
   /** Jev held. Pull the standing quote so an order it no longer wants cannot get hit. */
   private enqueueStandDown() {
+    this.entry = null;
     const seq = ++this.sendSeq;
     this.exchangeTail = this.exchangeTail.catch(() => {}).then(async () => {
       if (seq !== this.sendSeq) return;
@@ -360,6 +375,7 @@ export class Trader {
         leverage: a?.leverage ?? decision?.leverage ?? null,
         unrealizedUsd: round(unrealized, 6),
         unrealizedSz: round(unrealized / book.mid, 8),
+        markPx: this.market.assetCtx?.markPx ?? null,
       },
       totals: { ...t, jevUsd: round(t.jevUsd, 6), gasSz: round(t.gasSz, 8), gasUsd: round(t.gasUsd, 6), realizedUsd: round(t.realizedUsd, 6), pnlUsd: round(t.pnlUsd, 6), pnlSz: round(t.pnlSz, 8), pnlPct: round(t.pnlPct, 4) },
       accountValue: a && Number.isFinite(a.accountValue) ? round(a.accountValue, 2) : null,

@@ -15,6 +15,8 @@ export interface SleeveFeed {
   tape: PricePoint[];
   latest: BlockEvent | null;
   avgLatencyMs: number;
+  /** Newest touch off the price stream, between the once-a-tick block events. */
+  mark?: { ts: number; mid: number; bestBid: number; bestAsk: number; spreadBps: number; markPx?: number | null } | null;
 }
 
 export interface FeedState {

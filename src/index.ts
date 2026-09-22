@@ -42,6 +42,7 @@ for (const spec of specs) {
           bestBid: book.bid,
           bestAsk: book.ask,
           spreadBps: book.spreadBps,
+          markPx: feed.assetCtx?.markPx ?? null,
         });
       };
       await feed.connect();

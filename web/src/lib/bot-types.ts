@@ -96,6 +96,8 @@ export interface Position {
   leverage: number | null;
   unrealizedUsd: number;
   unrealizedSz: number;
+  /** The venue's mark. It prices PnL and liquidation against this, not the mid. */
+  markPx?: number | null;
 }
 
 export interface Totals {

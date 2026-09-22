@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import type { BlockEvent, Meta, PricePoint, SleeveMeta } from "@/lib/types";
 import { closedLots, tapeFills } from "@/lib/fills";
-import { roePct } from "@/lib/pnl";
+import { roePct, unrealizedAt } from "@/lib/pnl";
 import { displayCoin, fmtClock, fmtCoin, fmtPct, fmtPrice, fmtSignedUsd, fmtUsd, shortTx, txUrl } from "@/lib/format";
 import { Bone } from "@/components/Skeleton/Skeleton";
 import styles from "./Book.module.css";
@@ -22,6 +22,7 @@ function fmtSize(size: number): string {
 export default function Book({
   sleeves,
   latestByCoin,
+  markByCoin,
   tapeByCoin,
   selected,
   meta,
@@ -31,6 +32,8 @@ export default function Book({
 }: {
   sleeves: SleeveMeta[];
   latestByCoin: Record<string, BlockEvent | null>;
+  /** Live touch per coin, so a row does not sit still between ticks. */
+  markByCoin?: Record<string, { mid: number; markPx?: number | null } | null>;
   tapeByCoin: Record<string, PricePoint[]>;
   selected: string;
   meta?: Meta | null;
@@ -155,10 +158,13 @@ export default function Book({
                 const latest = latestByCoin[sleeve.coin] ?? null;
                 const pos = latest?.position;
                 const open = Boolean(pos && pos.side !== "flat" && pos.size > 0);
-                const mark = latest?.mid ?? null;
+                // One price for the whole row. The venue books PnL against its
+                // mark, so prefer that over the mid the chart draws.
+                const live = markByCoin?.[sleeve.coin] ?? null;
+                const mark = live?.markPx ?? pos?.markPx ?? live?.mid ?? latest?.mid ?? null;
                 const value = open && mark != null ? pos!.size * mark : null;
-                const u = open ? pos!.unrealizedUsd : 0;
-                const roe = roePct(pos);
+                const u = open ? unrealizedAt(pos, mark) : 0;
+                const roe = roePct(pos ? { ...pos, unrealizedUsd: u } : pos);
                 const side = (pos?.side ?? "flat").toUpperCase();
                 const sideColor =
                   pos?.side === "long" ? "var(--buy-ink)" : pos?.side === "short" ? "var(--sell-ink)" : undefined;

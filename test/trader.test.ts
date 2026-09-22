@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { pullResting, type Market } from "../src/market";
 import type { Model, ModelDecision } from "../src/model";
 import { leverageRungs, liveIntent, parseLeverage, planQuote, quoteAction } from "../src/plan";
+import { TradeFeed } from "../src/trades";
 import { jevUnavailable, Trader } from "../src/trader";
 import type { BlockEvent, Book, Quote, Side } from "../src/types";
 
@@ -202,4 +203,52 @@ test("shutdown pulls every resting order, and one stuck sleeve does not strand t
 test("shutdown reports rather than hangs when the venue stops answering", async () => {
   const pulled = await pullResting([{ cancelResting: () => new Promise<number[]>(() => {}) }], 20);
   expect(pulled).toBe(null);
+});
+
+test("a hold leaves the unfilled part of an entry working instead of stranding Jev", async () => {
+  const model = new ScriptModel();
+  const market = new FakeMarket();
+  const { trader } = desk(model, market);
+  const feed = new TradeFeed();
+  trader.attachTradeFeed(feed);
+
+  model.next = packed({ intent: "open", bias: "long", action: "buy" });
+  await trader.onBlock(1);
+  await Bun.sleep(20);
+
+  // The maker entry takes 0.003 of the 0.01 Jev asked for.
+  feed.pushPrint({ block: 2, price: 99.8, size: 0.003, side: "sell" });
+  model.next = packed({ intent: "hold", bias: "long", action: "hold" });
+  await trader.onBlock(2);
+  await Bun.sleep(20);
+  expect(market.cancels).toBe(0);
+
+  // Once the rest lands, a hold has nothing left to work and stands the book down.
+  feed.pushPrint({ block: 3, price: 99.8, size: 0.007, side: "sell" });
+  await trader.onBlock(3);
+  await Bun.sleep(20);
+  expect(market.cancels).toBeGreaterThan(0);
+});
+
+test("a close drops the entry, so a later hold does not revive it", async () => {
+  const model = new ScriptModel();
+  const market = new FakeMarket();
+  const { trader } = desk(model, market);
+  const feed = new TradeFeed();
+  trader.attachTradeFeed(feed);
+
+  model.next = packed({ intent: "open", bias: "long", action: "buy" });
+  await trader.onBlock(1);
+  await Bun.sleep(20);
+  feed.pushPrint({ block: 2, price: 99.8, size: 0.003, side: "sell" });
+
+  model.next = packed({ intent: "close", bias: "long", action: "sell" });
+  await trader.onBlock(2);
+  await Bun.sleep(20);
+
+  const before = market.cancels;
+  model.next = packed({ intent: "hold", bias: "long", action: "hold" });
+  await trader.onBlock(3);
+  await Bun.sleep(20);
+  expect(market.cancels).toBeGreaterThan(before);
 });

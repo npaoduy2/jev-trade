@@ -241,7 +241,7 @@ export function jevActionQuestions(state: TradeState) {
       },
       criteria: {
         close: `flatten all ${pos.size} now, an Ioc that crosses the touch`,
-        hold: "keep the position and place nothing this tick",
+        hold: "keep the position, and let any unfilled part of the entry keep working",
       },
     },
     leverage,

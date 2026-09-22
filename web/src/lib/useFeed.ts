@@ -18,6 +18,8 @@ interface Mark {
   bestBid: number;
   bestAsk: number;
   spreadBps: number;
+  /** The venue's mark. PnL and liquidation price against this, not the mid. */
+  markPx?: number | null;
 }
 
 interface SleeveMem extends SleeveFeed {
@@ -521,7 +523,7 @@ export function useFeed(apiUrl: string): FeedState & { loadTape: () => void } {
         dispatch({ type: "block", event: data as BlockEvent });
       });
       handle("price", (data) => {
-        const d = (data ?? {}) as { coin?: string; ts?: number; mid?: number; bestBid?: number; bestAsk?: number; spreadBps?: number };
+        const d = (data ?? {}) as { coin?: string; ts?: number; mid?: number; bestBid?: number; bestAsk?: number; spreadBps?: number; markPx?: number | null };
         if (typeof d.coin !== "string" || typeof d.mid !== "number" || typeof d.ts !== "number") return;
         dispatch({
           type: "price",
@@ -532,6 +534,7 @@ export function useFeed(apiUrl: string): FeedState & { loadTape: () => void } {
             bestBid: typeof d.bestBid === "number" ? d.bestBid : d.mid,
             bestAsk: typeof d.bestAsk === "number" ? d.bestAsk : d.mid,
             spreadBps: typeof d.spreadBps === "number" ? d.spreadBps : 0,
+            markPx: typeof d.markPx === "number" ? d.markPx : null,
           },
         });
       });

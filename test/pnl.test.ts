@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { portfolioBalance, portfolioPnl, roePct, sleevePnl } from "../web/src/lib/pnl";
+import { portfolioBalance, portfolioPnl, roePct, sleevePnl, unrealizedAt } from "../web/src/lib/pnl";
 import type { BlockEvent } from "../src/types";
 
 function event(partial: Partial<BlockEvent> & Pick<BlockEvent, "coin" | "position" | "totals">): BlockEvent {
@@ -66,4 +66,33 @@ test("sleeves sharing one wallet report one balance, not one per coin", () => {
 
   // No wallet map means the old behaviour, which suits separate accounts.
   expect(portfolioBalance(rows)).toBeCloseTo(996.12 * 3);
+});
+
+test("unrealizedAt prices a position at the mark it is handed", () => {
+  const long = { side: "long", size: 0.5, entryPrice: 100, unrealizedUsd: 999 };
+  expect(unrealizedAt(long, 110)).toBeCloseTo(5);
+  expect(unrealizedAt(long, 90)).toBeCloseTo(-5);
+
+  const short = { side: "short", size: 0.5, entryPrice: 100, unrealizedUsd: 999 };
+  expect(unrealizedAt(short, 110)).toBeCloseTo(-5);
+  expect(unrealizedAt(short, 90)).toBeCloseTo(5);
+
+  // No price to work from falls back to the figure the venue last reported.
+  expect(unrealizedAt(long, null)).toBe(999);
+  expect(unrealizedAt({ side: "flat", size: 0, entryPrice: null, unrealizedUsd: 0 }, 110)).toBe(0);
+});
+
+test("a live mark reprices an open sleeve, and none leaves the venue figure alone", () => {
+  const open = event({
+    coin: "BTC",
+    mid: 100,
+    position: { side: "long", size: 0.5, entryPrice: 100, leverage: 10, unrealizedUsd: 2.5, unrealizedSz: 0 },
+    totals: {
+      blocks: 1, decisions: 1, quotes: 1, fills: 1, reverted: 0, lateBlocks: 0,
+      jevUsd: 0, gasSz: 0, gasUsd: 0, realizedUsd: 0, pnlUsd: 0, pnlSz: 0, pnlPct: 0,
+    },
+  });
+  expect(sleevePnl(open).unrealized).toBe(2.5);
+  expect(sleevePnl(open, 110).unrealized).toBeCloseTo(5);
+  expect(portfolioPnl({ BTC: open }, { BTC: { mid: 100, markPx: 110 } }).unrealized).toBeCloseTo(5);
 });
