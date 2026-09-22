@@ -30,6 +30,7 @@ let server: ReturnType<typeof startServer> | undefined;
 const starters: Array<() => void> = [];
 const markets: VenueMarket[] = [];
 const desks: { market: VenueMarket; trader: Trader; label: string }[] = [];
+const failed: string[] = [];
 
 for (const spec of specs) {
   let lastErr: unknown;
@@ -83,13 +84,26 @@ for (const spec of specs) {
       break;
     } catch (e) {
       lastErr = e;
-      await Bun.sleep(1000 * (attempt + 1));
+      // A 429 means the venue wants less, not sooner.
+      const rate = /\b429\b/.test((e as Error).message);
+      await Bun.sleep((rate ? 4000 : 1000) * (attempt + 1));
     }
   }
-  if (lastErr) console.error(`sleeve ${spec.label} failed: ${(lastErr as Error).message}`);
+  if (lastErr) {
+    failed.push(spec.label);
+    console.error(`sleeve ${spec.label} failed: ${(lastErr as Error).message}`);
+  }
+  // Space the next sleeve out. Each one opens with a burst of REST calls.
+  await Bun.sleep(600);
 }
 
 if (!views.length) throw new Error("no sleeves started");
+
+// A sleeve that never started still has whatever it was holding, and now
+// nobody is asking Jev what to do with it.
+if (failed.length) {
+  console.error(`WARNING: ${failed.join(" ")} did not start. Any position they hold is unmanaged until they do.`);
+}
 
 server = startServer(meta, views);
 

@@ -15,6 +15,8 @@ export const BAR_MS: Record<Timeframe, number> = {
 /** Venues cap one candle request near this, which is enough for an ema200. */
 export const BARS = 500;
 const REFRESH_MS = 5 * 60_000;
+/** Gap between interval pulls, so one sleeve's refresh is not a burst. */
+const STAGGER_MS = 150;
 
 /** Closes for one interval, oldest first. The venue owns the request. */
 export type ClosePuller = (tf: HigherTf, bars: number, now: number) => Promise<number[]>;
@@ -43,7 +45,13 @@ export class Timeframes {
 
   async refresh(coin: string, now = Date.now()): Promise<void> {
     const due = HIGHER_TFS.filter((tf) => now - (this.pulledAt.get(tf) ?? 0) >= REFRESH_MS);
-    await Promise.all(due.map((tf) => this.pullOne(coin, tf, now)));
+    // One at a time. Four intervals per sleeve, fired together across every
+    // sleeve, is a burst the venue answers with 429 and a sleeve that never
+    // starts. Higher timeframes move slowly; none of this is urgent.
+    for (const tf of due) {
+      await this.pullOne(coin, tf, now);
+      await Bun.sleep(STAGGER_MS);
+    }
   }
 
   private async pullOne(coin: string, tf: HigherTf, now: number): Promise<void> {
