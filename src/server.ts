@@ -29,9 +29,15 @@ function jsonMaybeGzip(req: Request, body: unknown, status = 200) {
   });
 }
 
-export type SleeveView = { coin: string; history: () => BlockEvent[]; tape: () => PricePoint[] };
+export type SleeveView = {
+  coin: string;
+  history: () => BlockEvent[];
+  tape: () => PricePoint[];
+  /** The last payload handed to the model, for looking at what it was asked. */
+  lastAsk?: () => unknown;
+};
 
-/** GET /snapshot, GET /history, GET /tape, GET /events SSE */
+/** GET /snapshot, GET /history, GET /tape, GET /jev, GET /events SSE */
 export function startServer(meta: Meta, sleeves: SleeveView[]) {
   const clients = new Set<ReadableStreamDefaultController<Uint8Array>>();
   const enc = new TextEncoder();
@@ -85,6 +91,12 @@ export function startServer(meta: Meta, sleeves: SleeveView[]) {
       if (pathname === "/snapshot") return jsonMaybeGzip(req, snap().json);
       if (pathname === "/history") return jsonMaybeGzip(req, historyByCoin());
       if (pathname === "/tape") return jsonMaybeGzip(req, tapeByCoin());
+      if (pathname === "/jev") {
+        const out: Record<string, unknown> = {};
+        for (const v of sleeves) out[v.coin] = v.lastAsk?.() ?? null;
+        const only = url.searchParams.get("coin");
+        return jsonMaybeGzip(req, only ? { [only]: out[only] ?? null } : out);
+      }
       if (pathname === "/events") {
         const lite = url.searchParams.get("lite") === "1";
         const stream = new ReadableStream<Uint8Array>({

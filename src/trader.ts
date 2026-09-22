@@ -3,7 +3,7 @@ import { bpsBetween, snapshotIndicators, venueFeatures } from "./indicators";
 import { completedTrips, openedAt, replayGain } from "./history";
 import { HIGHER_TFS } from "./timeframes";
 import { isVenueOrderId, type VenueFillPrint, type VenueMarket } from "./venue";
-import type { Model, ModelDecision, TradeState } from "./model";
+import { jevQuestions, marketFacing, type Model, type ModelDecision, type TradeState } from "./model";
 import { leverageRungs, planQuote, type QuotePlan } from "./plan";
 import { aggregateFills, emptySummary, takeLiveFills, takeSimFills, type FlowWindow, type Resting, type TradeFeed } from "./trades";
 import type { BlockEvent, Book, Fill, OrderId, PricePoint, Quote, Side, Timing, Totals } from "./types";
@@ -33,6 +33,8 @@ export function jevUnavailable(e: unknown): boolean {
  */
 export class Trader {
   readonly history: BlockEvent[] = [];
+  /** Exactly what went to Jev last tick: the state it read and the questions asked. */
+  lastAsk: { at: number; tick: number; state: unknown; questions: unknown } | null = null;
   private mids: number[] = [];
   private busy = false;
   private lastBook: Book | null = null;
@@ -100,7 +102,9 @@ export class Trader {
         return;
       }
       try {
-        const decision = await this.model.decide(this.buildState(block, book));
+        const asked = this.buildState(block, book);
+        this.lastAsk = { at: Date.now(), tick: block, state: marketFacing(asked), questions: jevQuestions(asked) };
+        const decision = await this.model.decide(asked);
         this.totals.decisions++;
         this.totals.jevUsd += (decision.inputTokens / 1e6) * config.jevUsdPerMTok;
         const plan = planQuote({

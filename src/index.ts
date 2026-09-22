@@ -70,7 +70,7 @@ for (const spec of specs) {
       };
       markets.push(market);
       desks.push({ market, trader, label: spec.label });
-      views.push({ coin: spec.coin, history: () => trader.history, tape: () => trader.tape });
+      views.push({ coin: spec.coin, history: () => trader.history, tape: () => trader.tape, lastAsk: () => trader.lastAsk });
       meta.sleeves.push({ coin: spec.coin, pair: spec.pair, label: spec.label, wallet: market.address });
       if (spec === first) {
         meta.wallet = market.address;
