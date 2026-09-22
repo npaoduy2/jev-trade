@@ -104,7 +104,15 @@ class FakeMarket {
   readonly coin = "BTC";
   readonly pair = "BTC-USD";
   readonly liveKey = false;
-  readonly account = null;
+  account: {
+    positionSz: number; entryPrice: number | null; unrealizedUsd: number; realizedUsd: number;
+    feesUsd: number; accountValue: number; withdrawable: number; perpsValue: number;
+    leverage: number | null; liquidationPx: number | null;
+  } | null = null;
+  holds(sz: number, entry: number) {
+    this.account = { positionSz: sz, entryPrice: entry, unrealizedUsd: 0, realizedUsd: 0, feesUsd: 0,
+      accountValue: 1000, withdrawable: 900, perpsValue: 50, leverage: 10, liquidationPx: null };
+  }
   readonly sizeDecimals = 5;
   readonly maxLeverage = 40;
   readonly takerFeeBps = 4.5;
@@ -330,4 +338,48 @@ test("a resting exit posts at the touch, a crossing one takes it", () => {
   // Saying nothing still crosses, which is what an exit did before there was a choice.
   const silent = planQuote({ intent: "close", bias: "short", positionSz: -0.08, quoteSz: 0.01 });
   expect(silent).toEqual({ side: "buy", size: 0.08, reduceOnly: true, taker: true });
+});
+
+test("a restart rebuilds the position's peak and path from the venue", async () => {
+  const model = new ScriptModel();
+  const market = new FakeMarket();
+  const { trader } = desk(model, market);
+  const now = Date.now();
+  const min = 60_000;
+
+  market.holds(1, 100);
+  // Opened five minutes ago at 100. It ran to 110 and has given most of it back.
+  trader.restore({
+    nowMs: now,
+    fills: [
+      { ts: now - 40 * min, side: "buy", price: 100, size: 1 },
+      { ts: now - 30 * min, side: "sell", price: 101, size: 1 },   // a finished round trip
+      { ts: now - 5 * min, side: "buy", price: 100, size: 1 },     // the position still on
+    ],
+    positionSz: 1,
+    entryPrice: 100,
+    closes: [100, 105, 110, 107, 104],
+  });
+
+  model.next = packed({ intent: "hold", bias: "long", action: "hold" });
+  await trader.onBlock(1);
+  const s = model.seen!;
+
+  expect(s.position.peakBps).toBeCloseTo(1000, 0);      // 110 against an entry of 100
+  expect(s.position.fromPeakBps!).toBeGreaterThan(500); // and it is nowhere near that now
+  expect(s.position.ageTicks).toBeGreaterThanOrEqual(5);
+  expect(s.position.pathBps).toContain("1000");
+  // The finished round trip is remembered too, so churn does not read as zero.
+  expect(s.recent.holdTicksMedian).toBe(10);
+});
+
+test("nothing to rebuild leaves a flat desk flat", async () => {
+  const model = new ScriptModel();
+  const market = new FakeMarket();
+  const { trader } = desk(model, market);
+  trader.restore({ nowMs: Date.now(), fills: [], positionSz: 0, entryPrice: null, closes: [] });
+  model.next = packed({ intent: "hold", bias: "long", action: "hold" });
+  await trader.onBlock(1);
+  expect(model.seen!.position.peakBps).toBe(null);
+  expect(model.seen!.recent.trips).toBe(0);
 });

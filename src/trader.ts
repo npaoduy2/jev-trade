@@ -1,7 +1,8 @@
 import { config } from "./config";
 import { bpsBetween, snapshotIndicators, venueFeatures } from "./indicators";
+import { completedTrips, openedAt, replayGain } from "./history";
 import { HIGHER_TFS } from "./timeframes";
-import { isVenueOrderId, type VenueMarket } from "./venue";
+import { isVenueOrderId, type VenueFillPrint, type VenueMarket } from "./venue";
 import type { Model, ModelDecision, TradeState } from "./model";
 import { leverageRungs, planQuote, type QuotePlan } from "./plan";
 import { aggregateFills, emptySummary, takeLiveFills, takeSimFills, type FlowWindow, type Resting, type TradeFeed } from "./trades";
@@ -255,6 +256,45 @@ export class Trader {
       }
     }
     return null;
+  }
+
+  /**
+   * Rebuild from the venue what this process never saw. A restart otherwise
+   * hands Jev a position with no peak, no path and no record of how often it
+   * has been going around, which are the numbers that argue against closing a
+   * winner early.
+   */
+  restore(opts: {
+    nowMs: number;
+    fills: VenueFillPrint[];
+    positionSz: number;
+    entryPrice: number | null;
+    closes: number[];
+  }) {
+    const firstBlock = 1;
+    const ticksOf = (ms: number) => Math.max(0, Math.round(ms / config.tickMs));
+    this.trips = completedTrips(opts.fills)
+      .slice(-50)
+      .map((t) => ({
+        closedAt: firstBlock - ticksOf(opts.nowMs - t.closedAt),
+        heldTicks: Math.max(1, ticksOf(t.heldMs)),
+        notionalUsd: t.notionalUsd,
+      }));
+
+    this.track = null;
+    const since = openedAt(opts.fills);
+    if (since == null || !opts.positionSz || !opts.entryPrice) return;
+    const bars = Math.max(1, Math.round((opts.nowMs - since) / 60_000));
+    const g = replayGain(opts.closes.slice(-bars), opts.entryPrice, opts.positionSz < 0);
+    if (!g) return;
+    const barsAgo = g.path.length - 1 - g.peakIdx;
+    this.track = {
+      openedAt: firstBlock - ticksOf(opts.nowMs - since) + 1,
+      peak: g.peak,
+      peakAt: firstBlock - ticksOf(barsAgo * 60_000),
+      path: g.path.slice(-PATH_SAMPLES),
+      notionalUsd: Math.abs(opts.positionSz) * opts.entryPrice,
+    };
   }
 
   /**

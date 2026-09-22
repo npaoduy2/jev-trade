@@ -29,6 +29,7 @@ const meta: Meta = {
 let server: ReturnType<typeof startServer> | undefined;
 const starters: Array<() => void> = [];
 const markets: VenueMarket[] = [];
+const desks: { market: VenueMarket; trader: Trader; label: string }[] = [];
 
 for (const spec of specs) {
   let lastErr: unknown;
@@ -67,6 +68,7 @@ for (const spec of specs) {
         }, p.ts);
       };
       markets.push(market);
+      desks.push({ market, trader, label: spec.label });
       views.push({ coin: spec.coin, history: () => trader.history, tape: () => trader.tape });
       meta.sleeves.push({ coin: spec.coin, pair: spec.pair, label: spec.label, wallet: market.address });
       if (spec === first) {
@@ -90,6 +92,40 @@ for (const spec of specs) {
 if (!views.length) throw new Error("no sleeves started");
 
 server = startServer(meta, views);
+
+/**
+ * Wait for the venue to answer before the first decision. A tick that runs on a
+ * half-loaded account hands Jev a position it cannot see, and the desk cancels
+ * every resting order on the way in, so there is nothing to lose by waiting.
+ */
+const SETTLE_TRIES = 10;
+const SETTLE_WAIT_MS = 500;
+
+for (const { market, trader, label } of desks) {
+  if (!market.liveKey) continue;
+  let account = market.account;
+  for (let i = 0; i < SETTLE_TRIES && !account; i++) {
+    await market.refresh().catch(() => {});
+    account = market.account;
+    if (!account) await Bun.sleep(SETTLE_WAIT_MS);
+  }
+  if (!account) {
+    console.warn(`${label}: venue did not answer, starting without its position history`);
+    continue;
+  }
+  trader.restore({
+    nowMs: Date.now(),
+    fills: market.fillPrints,
+    positionSz: account.positionSz,
+    entryPrice: account.entryPrice,
+    closes: market.candleCloses(600),
+  });
+  const held = account.positionSz
+    ? `${account.positionSz > 0 ? "long" : "short"} ${Math.abs(account.positionSz)} @ ${account.entryPrice}`
+    : "flat";
+  console.log(`${label} synced: ${held}, ${market.fillPrints.length} fills replayed`);
+}
+
 for (const start of starters) start();
 
 console.log(`jev-trade ${config.venue} ${meta.sleeves.map((s) => s.label).join(" ")} model=${meta.model}${config.model === "jev" ? ` ${config.jevProvider}` : ""} tick ${config.tickMs}ms price ${config.priceMs}ms quote $${config.quoteUsd}/x cap $${config.maxNotionalUsd} :${config.port}`);
