@@ -43,6 +43,20 @@ export interface TradeState {
     /** Mid to liquidationPx, absolute. Distinct from entryVsMidBps. */
     liquidationDistBps: number | null;
     unrealizedUsd: number;
+    /** Ticks since this position opened. */
+    ageTicks: number;
+    /** Best it has been, in bps from entry, flipped so a short's gain is positive. */
+    peakBps: number | null;
+    /** Handed back from that peak. */
+    fromPeakBps: number | null;
+    /** Ticks since the peak was last set. */
+    ticksSincePeak: number | null;
+    /** The peak measured in units of this interval's own noise. */
+    peakVsVol: number | null;
+    /** Crossing the touch plus the taker fee, to flatten right now. */
+    costToCloseBps: number | null;
+    /** Gain in bps per tick since it opened, oldest first. */
+    pathBps: string;
   };
   /** One read per venue interval, keyed 1m/15m/1h/4h/1d. Same shape for each. */
   mtf: { [tf: string]: IndicatorSnap };
@@ -119,6 +133,13 @@ export function marketFacing(state: TradeState, read: { trend: Trend } | null = 
       liquidationPx: pos.liquidationPx,
       entryVsMidBps: pos.entryVsMidBps,
       liquidationDistBps: pos.liquidationDistBps,
+      ageTicks: pos.ageTicks,
+      peakBps: pos.peakBps,
+      fromPeakBps: pos.fromPeakBps,
+      ticksSincePeak: pos.ticksSincePeak,
+      peakVsVol: pos.peakVsVol,
+      costToCloseBps: pos.costToCloseBps,
+      pathBps: pos.pathBps,
       ...(pos.side === "flat" ? {} : { unrealizedUsd: pos.unrealizedUsd }),
     },
     mtf: state.mtf,
@@ -154,6 +175,12 @@ export function fieldGuide(state: TradeState): string {
     `position.entryVsMidBps = mid against entry, signed, not flipped for a short.`,
     `position.unrealizedUsd is the venue's, priced at asset.markPx, not at mid. mark and mid differ.`,
     `position.liquidationDistBps = mid to liquidationPx, absolute.`,
+    `position gain fields are flipped for a short, so above 0 is always in your favour.`,
+    `position.ageTicks = ticks since this position opened, 0 while flat.`,
+    `position.peakBps = the best this position has been. fromPeakBps = handed back since. ticksSincePeak = how long since it last set one.`,
+    `position.peakVsVol = peakBps over the 1m vol20Bps, the peak in units of this market's own noise.`,
+    `position.pathBps = gain in bps at each tick since it opened, oldest first.`,
+    `position.costToCloseBps = half the spread plus the taker fee, what flattening now costs against mid.`,
     `null = not enough history for that field.`,
   ].join(" ");
 }

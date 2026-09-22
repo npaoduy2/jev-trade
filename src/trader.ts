@@ -15,6 +15,8 @@ const emptyTotals = (): Totals => ({
 const JEV_PAUSE_MS = 30_000;
 /** How stale the venue snapshot may get before a tick waits on a fresh one. */
 const REFRESH_MS = 10_000;
+/** How much of a position's gain history rides along. Bounds the payload. */
+const PATH_SAMPLES = 30;
 
 export function jevUnavailable(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
@@ -43,6 +45,8 @@ export class Trader {
   private refreshedAt = 0;
   /** The entry Jev asked for, kept until it is filled, closed, or stood down. */
   private entry: { side: Side; target: number } | null = null;
+  /** Where the open position has been. Reset the moment it goes flat. */
+  private track: { openedAt: number; peak: number; peakAt: number; path: number[] } | null = null;
 
   constructor(
     private market: Market,
@@ -246,6 +250,25 @@ export class Trader {
     return null;
   }
 
+  /**
+   * Follow the open position's gain across ticks. A position at -5bps that
+   * peaked at +45 and one that never cleared +2 read the same from unrealized
+   * alone, and they are not the same position.
+   */
+  private trackPath(block: number, gainBps: number | null) {
+    if (gainBps == null) {
+      this.track = null;
+      return;
+    }
+    if (!this.track) this.track = { openedAt: block, peak: gainBps, peakAt: block, path: [] };
+    if (gainBps > this.track.peak) {
+      this.track.peak = gainBps;
+      this.track.peakAt = block;
+    }
+    this.track.path.push(round(gainBps, 1));
+    if (this.track.path.length > PATH_SAMPLES) this.track.path.shift();
+  }
+
   private buildState(block: number, book: Book): TradeState {
     this.syncFromVenue();
     const m = this.mids, n = m.length, H = config.horizonBlocks;
@@ -270,6 +293,13 @@ export class Trader {
     }
     const liqPx = a?.liquidationPx ?? null;
     const liqDist = liqPx != null ? Math.abs(bpsBetween(book.mid, liqPx) ?? Number.NaN) : null;
+    const side = posSz > 0 ? "long" : posSz < 0 ? "short" : "flat";
+    const entryVsMid = bpsBetween(entry, book.mid);
+    // Flip the short so that above zero always means the position is winning.
+    const gainBps = side === "flat" || entryVsMid == null ? null : side === "short" ? -entryVsMid : entryVsMid;
+    this.trackPath(block, gainBps);
+    const t = this.track;
+    const vol = mtf["1m"]?.vol20Bps ?? null;
     return {
       coin: this.market.coin,
       market: this.market.pair,
@@ -289,15 +319,22 @@ export class Trader {
       lastTick: this.lastAnswer(),
       position: {
         coin: this.market.coin,
-        side: posSz > 0 ? "long" : posSz < 0 ? "short" : "flat",
+        side,
         size: round(Math.abs(posSz), 8),
         notionalUsd: round(Math.abs(posSz) * book.mid, 4),
         entry,
         leverage: a?.leverage ?? null,
         liquidationPx: a?.liquidationPx ?? null,
-        entryVsMidBps: rnull(bpsBetween(entry, book.mid), 2),
+        entryVsMidBps: rnull(entryVsMid, 2),
         liquidationDistBps: rnull(liqDist, 2),
         unrealizedUsd: round(unrealized, 4),
+        ageTicks: t ? block - t.openedAt + 1 : 0,
+        peakBps: t ? round(t.peak, 2) : null,
+        fromPeakBps: t && gainBps != null ? round(t.peak - gainBps, 2) : null,
+        ticksSincePeak: t ? block - t.peakAt : null,
+        peakVsVol: t && vol ? round(t.peak / vol, 2) : null,
+        costToCloseBps: round(book.spreadBps / 2 + this.market.takerFeeBps, 2),
+        pathBps: t ? t.path.join(" ") : "",
       },
       mtf,
       asset: { ...asset, openInterestChangeBps: rnull(oiChangeBps, 2), maxLeverage: this.market.maxLeverage },

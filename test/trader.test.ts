@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { pullResting, repeatMeansGiveUp, type Market } from "../src/market";
-import type { Model, ModelDecision } from "../src/model";
+import type { Model, ModelDecision, TradeState } from "../src/model";
 import { leverageRungs, liveIntent, parseLeverage, planQuote, quoteAction } from "../src/plan";
 import { TradeFeed } from "../src/trades";
 import { jevUnavailable, Trader } from "../src/trader";
@@ -90,7 +90,9 @@ class ScriptModel implements Model {
   readonly name = "script";
   next: ModelDecision | Error = packed({ intent: "hold", bias: "long", action: "hold" });
   delayMs = 0;
-  async decide(): Promise<ModelDecision> {
+  seen: TradeState | null = null;
+  async decide(state?: TradeState): Promise<ModelDecision> {
+    if (state) this.seen = state;
     if (this.delayMs) await Bun.sleep(this.delayMs);
     if (this.next instanceof Error) throw this.next;
     return this.next;
@@ -104,6 +106,7 @@ class FakeMarket {
   readonly account = null;
   readonly szDecimals = 5;
   readonly maxLeverage = 40;
+  readonly takerFeeBps = 4.5;
   readonly fillPrints: [] = [];
   assetCtx = null;
   lastOid: number | null = null;
@@ -264,4 +267,54 @@ test("a stop signal repeated in the same breath does not abandon the cancel", ()
   expect(repeatMeansGiveUp(first, first + 4_000)).toBe(true);
   // Nothing in flight yet.
   expect(repeatMeansGiveUp(0, first)).toBe(false);
+});
+
+test("an open position carries where it has been, not just where it is", async () => {
+  const model = new ScriptModel();
+  const market = new FakeMarket();
+  const { trader } = desk(model, market);
+  const feed = new TradeFeed();
+  trader.attachTradeFeed(feed);
+
+  const at = (mid: number) => market.moveBookTo({ ...book, bid: mid - 0.05, ask: mid + 0.05, mid });
+
+  model.next = packed({ intent: "open", bias: "long", action: "buy" });
+  await trader.onBlock(1);
+  await Bun.sleep(20);
+  feed.pushPrint({ block: 2, price: 99.8, size: 0.01, side: "sell" });
+
+  model.next = packed({ intent: "hold", bias: "long", action: "hold" });
+  at(101);          // the position runs
+  await trader.onBlock(2);
+  at(102);          // and runs further: this is the peak
+  await trader.onBlock(3);
+  at(100.5);        // then hands some of it back
+  await trader.onBlock(4);
+  at(100.2);
+  await trader.onBlock(5);
+
+  const p = model.seen!.position;
+  expect(p.side).toBe("long");
+  expect(p.ageTicks).toBe(4);
+  // Entry was 99.9, so the peak at 102 is about 210bps and the position now sits near 30.
+  expect(p.peakBps!).toBeGreaterThan(200);
+  expect(p.fromPeakBps!).toBeGreaterThan(150);
+  expect(p.ticksSincePeak).toBe(2);
+  expect(p.pathBps.split(" ").length).toBe(4);
+  expect(p.costToCloseBps!).toBeGreaterThan(4.5);
+});
+
+test("going flat forgets the path so the next position starts clean", async () => {
+  const model = new ScriptModel();
+  const market = new FakeMarket();
+  const { trader } = desk(model, market);
+  model.next = packed({ intent: "hold", bias: "long", action: "hold" });
+  await trader.onBlock(1);
+  const p = model.seen!.position;
+  expect(p.side).toBe("flat");
+  expect(p.ageTicks).toBe(0);
+  expect(p.peakBps).toBe(null);
+  expect(p.pathBps).toBe("");
+  // The cost of crossing is a fact about the book, known with or without a position.
+  expect(p.costToCloseBps).toBeGreaterThan(0);
 });

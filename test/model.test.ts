@@ -37,6 +37,13 @@ function fixture(side: TradeState["position"]["side"]): TradeState {
       entryVsMidBps: null,
       liquidationDistBps: null,
       unrealizedUsd: side === "flat" ? 0 : -1.25,
+      ageTicks: side === "flat" ? 0 : 4,
+      peakBps: side === "flat" ? null : 42.5,
+      fromPeakBps: side === "flat" ? null : 30.1,
+      ticksSincePeak: side === "flat" ? null : 2,
+      peakVsVol: side === "flat" ? null : 5.3,
+      costToCloseBps: 4.56,
+      pathBps: side === "flat" ? "" : "0 20.4 42.5 12.4",
     },
     mtf: Object.fromEntries(TIMEFRAMES.map((tf) => [tf, flatSnap()])),
     asset: {
@@ -109,6 +116,12 @@ test("the field guide describes every block Jev is handed", () => {
   const selfEvident = new Set(["coin", "market", "tick", "tickms", "maxleverage", "mid"]);
   for (const key of Object.keys(seen)) {
     if (selfEvident.has(key.toLowerCase())) continue;
+    expect(guide).toContain(key.toLowerCase());
+  }
+  // The position carries the most fields and the ones easiest to misread.
+  const known = new Set(["coin", "side", "size", "notionalusd", "entry", "leverage", "liquidationpx"]);
+  for (const key of Object.keys(seen.position)) {
+    if (known.has(key.toLowerCase())) continue;
     expect(guide).toContain(key.toLowerCase());
   }
 });

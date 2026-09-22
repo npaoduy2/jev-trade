@@ -23,6 +23,9 @@ export class Market {
   account: VenueAccount | null = null;
   szDecimals = 5;
   maxLeverage = 50;
+  /** Venue fee rates, read at init. Defaults are the standard tier. */
+  takerFeeBps = 4.5;
+  makerFeeBps = 1.5;
   private info: InfoClient;
   private ex: Ex | null = null;
   private assetId = 0;
@@ -100,6 +103,7 @@ export class Market {
       await this.cancelOpen();
     }
     await this.loadMaxLeverage();
+    await this.loadFees();
     await this.refresh();
     if (this.address) await this.seedFills();
     const net = config.hlTestnet ? "testnet" : "mainnet";
@@ -110,6 +114,25 @@ export class Market {
       const size = a ? Math.abs(a.positionSz) : 0;
       const entry = a?.entryPrice != null ? ` @ ${a.entryPrice}` : "";
       console.log(`${this.label} · equity $${(a?.accountValue ?? 0).toFixed(2)} · available $${this.margin.usdc.toFixed(2)} · perps $${(a?.perpsValue ?? 0).toFixed(2)} · ${side} ${size} ${this.coin}${entry}`);
+    }
+  }
+
+  /** Fee tier from the venue, so the cost of crossing is the real one. */
+  private async loadFees() {
+    if (!this.wallet) return;
+    try {
+      const res = await fetch(config.hlTestnet ? "https://api.hyperliquid-testnet.xyz/info" : "https://api.hyperliquid.xyz/info", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "userFees", user: this.wallet.address }),
+      });
+      if (!res.ok) return;
+      const f = (await res.json()) as { userCrossRate?: string; userAddRate?: string };
+      const cross = Number(f.userCrossRate), add = Number(f.userAddRate);
+      if (Number.isFinite(cross) && cross >= 0) this.takerFeeBps = cross * 10_000;
+      if (Number.isFinite(add) && add >= 0) this.makerFeeBps = add * 10_000;
+    } catch {
+      // keep the defaults
     }
   }
 
