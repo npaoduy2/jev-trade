@@ -1,0 +1,141 @@
+#cloud-config
+# Provisions the Jev Trade desk on a single Ubuntu 24.04 VM.
+#   Caddy on 80/443 is the only public listener.
+#   /        -> Next dashboard on 127.0.0.1:3001
+#   /api/*   -> Bun bot on 127.0.0.1:3000, prefix stripped
+# Same origin for both, so the dashboard reads /api/events with no CORS round trip
+# and one certificate covers the desk.
+#
+# No secrets here. cloud-init user data is readable from the instance metadata
+# service, so .env travels later over ssh (see sync.sh).
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - git
+  - rsync
+  - curl
+  - unzip
+  - ca-certificates
+  - debian-keyring
+  - debian-archive-keyring
+  - apt-transport-https
+  - gnupg
+
+write_files:
+  # 1 vCPU / 1 GiB leaves no headroom for a Next build. Swap is the difference
+  # between a build that finishes and an OOM kill.
+  - path: /etc/sysctl.d/99-jev-swap.conf
+    content: |
+      vm.swappiness=10
+
+  # Staged here on purpose, NOT at /etc/caddy/Caddyfile. That path is a dpkg
+  # conffile of the caddy package: a file already sitting there when the package
+  # unpacks stops dpkg on a conffile prompt it cannot answer without a terminal,
+  # the postinst never runs, the caddy system user is never created, and the unit
+  # then dies with status=217/USER. runcmd copies this into place after install.
+  - path: /opt/jev-caddy/Caddyfile
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # Swap ":80" for your hostname (and drop the http:// scheme) to have Caddy
+      # take out a certificate automatically:
+      #   desk.example.com {
+      :80 {
+        encode zstd gzip
+
+        # Bot. handle_path strips /api, so /api/events reaches the bot as /events.
+        handle_path /api/* {
+          reverse_proxy 127.0.0.1:3000 {
+            # Server sent events must not be buffered or the tape arrives in lumps.
+            flush_interval -1
+            transport http {
+              response_header_timeout 24h
+            }
+          }
+        }
+
+        # Dashboard.
+        handle {
+          reverse_proxy 127.0.0.1:3001
+        }
+      }
+
+  - path: /etc/systemd/system/jev-bot.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Jev Trade bot (Bun)
+      Documentation=https://www.jev-trade.com/
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=azureuser
+      Group=azureuser
+      WorkingDirectory=/opt/jev-trade
+      # Bun reads /opt/jev-trade/.env itself. No EnvironmentFile, no dotenv.
+      Environment=NODE_ENV=production
+      ExecStart=/home/azureuser/.bun/bin/bun run src/index.ts
+      Restart=always
+      RestartSec=5
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=jev-bot
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/jev-web.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Jev Trade dashboard (Next)
+      After=network-online.target jev-bot.service
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=azureuser
+      Group=azureuser
+      WorkingDirectory=/opt/jev-trade/web
+      Environment=NODE_ENV=production
+      ExecStart=/home/azureuser/.bun/bin/bun run start
+      Restart=always
+      RestartSec=5
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=jev-web
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # --- 2 GiB swap -------------------------------------------------------------
+  - [ bash, -c, "test -f /swapfile || (fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile)" ]
+  - [ bash, -c, "swapon --show | grep -q /swapfile || swapon /swapfile" ]
+  - [ bash, -c, "grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab" ]
+  - [ sysctl, --system ]
+
+  # --- Caddy ------------------------------------------------------------------
+  - [ bash, -c, "curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg" ]
+  - [ bash, -c, "curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list" ]
+  - [ bash, -c, "DEBIAN_FRONTEND=noninteractive apt-get update" ]
+  - [ bash, -c, "DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::=--force-confold caddy" ]
+  - [ bash, -c, "install -o root -g root -m 0644 /opt/jev-caddy/Caddyfile /etc/caddy/Caddyfile" ]
+
+  # --- Bun, as the user the services run as -----------------------------------
+  - [ bash, -c, "sudo -u azureuser -H bash -lc 'curl -fsSL https://bun.sh/install | bash'" ]
+
+  # --- App directory ----------------------------------------------------------
+  - [ install, -d, -o, azureuser, -g, azureuser, -m, '0755', /opt/jev-trade ]
+
+  # Units are written but left stopped: /opt/jev-trade is still empty and
+  # Restart=always would just crash loop. sync.sh enables them once code lands.
+  - [ systemctl, daemon-reload ]
+  - [ systemctl, enable, --now, caddy ]
+  - [ bash, -c, "systemctl reload caddy || systemctl restart caddy" ]
