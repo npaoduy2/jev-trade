@@ -1,6 +1,6 @@
 import { config } from "./config";
 import { Feed } from "./feed";
-import { Market } from "./market";
+import { Market, pullResting } from "./market";
 import { createModel } from "./model";
 import { loadSleeves } from "./sleeves";
 import { startServer, type SleeveView } from "./server";
@@ -28,6 +28,7 @@ const meta: Meta = {
 
 let server: ReturnType<typeof startServer> | undefined;
 const starters: Array<() => void> = [];
+const markets: Market[] = [];
 
 for (const spec of specs) {
   let lastErr: unknown;
@@ -65,6 +66,7 @@ for (const spec of specs) {
           dir: p.dir,
         }, p.ts);
       };
+      markets.push(market);
       views.push({ coin: spec.coin, history: () => trader.history, tape: () => trader.tape });
       meta.sleeves.push({ coin: spec.coin, pair: spec.pair, label: spec.label, wallet: market.address });
       if (spec === first) {
@@ -91,6 +93,28 @@ server = startServer(meta, views);
 for (const start of starters) start();
 
 console.log(`jev-trade ${meta.sleeves.map((s) => s.label).join(" ")} model=${meta.model}${config.model === "jev" ? ` ${config.jevProvider}` : ""} tick ${config.tickMs}ms price ${config.priceMs}ms quote $${config.quoteUsd}/x cap $${config.maxNotionalUsd} :${config.port}`);
+
+/** A resting entry outlives the process that placed it, so pull it on the way out. */
+const SHUTDOWN_MS = 5_000;
+let leaving = false;
+
+async function shutdown(signal: string) {
+  if (leaving) {
+    // A second signal means stop waiting on the venue.
+    console.error(`${signal} again, leaving orders as they are`);
+    process.exit(130);
+  }
+  leaving = true;
+  console.log(`${signal}: pulling resting orders`);
+  const pulled = await pullResting(markets, SHUTDOWN_MS);
+  if (pulled == null) console.error(`shutdown: venue did not answer in ${SHUTDOWN_MS}ms, orders may still rest`);
+  else console.log(`shutdown: pulled ${pulled.length} resting order${pulled.length === 1 ? "" : "s"}`);
+  process.exit(0);
+}
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => void shutdown(signal));
+}
 
 function onEvent(coin: string) {
   return (e: BlockEvent, t?: Timing) => {

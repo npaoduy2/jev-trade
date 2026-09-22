@@ -372,6 +372,21 @@ export class Market {
   }
 }
 
+/**
+ * Pull every order this process left resting. Returns the ids it cancelled, or
+ * null when the venue did not answer in time. One sleeve failing does not stop
+ * the rest: a stuck cancel must not strand the others on the book.
+ */
+export async function pullResting(
+  markets: { cancelResting(): Promise<number[]> }[],
+  timeoutMs: number,
+): Promise<number[] | null> {
+  const all = Promise.all(markets.map((m) => m.cancelResting().catch(() => [] as number[])));
+  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs));
+  const done = await Promise.race([all, timeout]);
+  return done == null ? null : done.flat();
+}
+
 function lot(raw: number, szDecimals: number): number {
   if (!Number.isFinite(raw) || raw <= 0) return 0;
   try {

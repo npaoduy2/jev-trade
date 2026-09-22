@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { Market } from "../src/market";
+import { pullResting, type Market } from "../src/market";
 import type { Model, ModelDecision } from "../src/model";
 import { leverageRungs, liveIntent, parseLeverage, planQuote, quoteAction } from "../src/plan";
 import { jevUnavailable, Trader } from "../src/trader";
@@ -184,4 +184,22 @@ test("an entry is priced off the book at send time, not the one the tick opened 
   await trader.onBlock(1);
   await Bun.sleep(60);
   expect(market.sentBook?.mid).toBe(120.1);
+});
+
+test("shutdown pulls every resting order, and one stuck sleeve does not strand the rest", async () => {
+  const pulled = await pullResting(
+    [
+      { cancelResting: async () => [11, 12] },
+      { cancelResting: async () => { throw new Error("venue said no"); } },
+      { cancelResting: async () => [] },
+      { cancelResting: async () => [13] },
+    ],
+    1_000,
+  );
+  expect(pulled).toEqual([11, 12, 13]);
+});
+
+test("shutdown reports rather than hangs when the venue stops answering", async () => {
+  const pulled = await pullResting([{ cancelResting: () => new Promise<number[]>(() => {}) }], 20);
+  expect(pulled).toBe(null);
 });
