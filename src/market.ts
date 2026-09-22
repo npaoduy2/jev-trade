@@ -97,7 +97,7 @@ export class Market {
       this.feed.onGone = (oid) => {
         if (this.lastOid === oid) this.forgetResting();
       };
-      await this.clearOpen();
+      await this.cancelOpen();
     }
     await this.loadMaxLeverage();
     await this.refresh();
@@ -113,15 +113,23 @@ export class Market {
     }
   }
 
-  private async clearOpen() {
-    if (!this.wallet || !this.ex) return;
+  /**
+   * Ask the venue what is still on the book for this coin and cancel all of it.
+   * `cancelResting` only knows the id it last saw, and a partial fill reports
+   * `filled` on orderUpdates, which drops that id while the remainder rests on.
+   */
+  async cancelOpen(): Promise<number[]> {
+    if (!this.wallet || !this.ex) return [];
     try {
       const opens = await this.info.openOrders({ user: this.wallet.address });
       const mine = opens.filter((o) => sameCoin(o.coin, this.coin));
-      if (!mine.length) return;
+      if (!mine.length) return [];
       await this.ex.cancel({ cancels: mine.map((o) => ({ a: this.assetId, o: o.oid })) });
+      this.forgetResting();
+      return mine.map((o) => o.oid);
     } catch {
       // next quote will replace if we still see them
+      return [];
     }
   }
 
@@ -378,10 +386,10 @@ export class Market {
  * the rest: a stuck cancel must not strand the others on the book.
  */
 export async function pullResting(
-  markets: { cancelResting(): Promise<number[]> }[],
+  markets: { cancelOpen(): Promise<number[]> }[],
   timeoutMs: number,
 ): Promise<number[] | null> {
-  const all = Promise.all(markets.map((m) => m.cancelResting().catch(() => [] as number[])));
+  const all = Promise.all(markets.map((m) => m.cancelOpen().catch(() => [] as number[])));
   const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs));
   const done = await Promise.race([all, timeout]);
   return done == null ? null : done.flat();

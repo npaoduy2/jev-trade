@@ -190,10 +190,10 @@ test("an entry is priced off the book at send time, not the one the tick opened 
 test("shutdown pulls every resting order, and one stuck sleeve does not strand the rest", async () => {
   const pulled = await pullResting(
     [
-      { cancelResting: async () => [11, 12] },
-      { cancelResting: async () => { throw new Error("venue said no"); } },
-      { cancelResting: async () => [] },
-      { cancelResting: async () => [13] },
+      { cancelOpen: async () => [11, 12] },
+      { cancelOpen: async () => { throw new Error("venue said no"); } },
+      { cancelOpen: async () => [] },
+      { cancelOpen: async () => [13] },
     ],
     1_000,
   );
@@ -201,7 +201,7 @@ test("shutdown pulls every resting order, and one stuck sleeve does not strand t
 });
 
 test("shutdown reports rather than hangs when the venue stops answering", async () => {
-  const pulled = await pullResting([{ cancelResting: () => new Promise<number[]>(() => {}) }], 20);
+  const pulled = await pullResting([{ cancelOpen: () => new Promise<number[]>(() => {}) }], 20);
   expect(pulled).toBe(null);
 });
 
