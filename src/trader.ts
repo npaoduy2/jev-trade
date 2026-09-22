@@ -13,6 +13,8 @@ const emptyTotals = (): Totals => ({
 });
 
 const JEV_PAUSE_MS = 30_000;
+/** How stale the venue snapshot may get before a tick waits on a fresh one. */
+const REFRESH_MS = 10_000;
 
 export function jevUnavailable(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
@@ -38,6 +40,7 @@ export class Trader {
   private totals: Totals = emptyTotals();
   private jevPauseUntil = 0;
   private lastOi: number | null = null;
+  private refreshedAt = 0;
 
   constructor(
     private market: Market,
@@ -57,7 +60,6 @@ export class Trader {
 
   async onBlock(block: number) {
     this.totals.blocks++;
-    if (this.totals.blocks % 5 === 0) this.market.refresh().catch(() => {});
     if (this.busy) {
       this.markLate(block, this.lastBook);
       return;
@@ -72,6 +74,13 @@ export class Trader {
       if (this.mids.length > 400) this.mids.shift();
       this.harvest();
 
+      // Refresh before reading, so the position, unrealized, and liquidation that
+      // Jev and the desk both see belong to this tick. Counting ticks instead of
+      // elapsed time made this every 10s at a 2s tick and every 5min at a 60s one.
+      if (Date.now() - this.refreshedAt >= REFRESH_MS) {
+        this.refreshedAt = Date.now();
+        await this.market.refresh().catch(() => {});
+      }
       this.syncFromVenue();
       const timing = { readMs: Math.round(readMs), loopMs: 0 };
       if (Date.now() < this.jevPauseUntil) {
