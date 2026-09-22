@@ -57,10 +57,10 @@ export const config = {
   /** Notional of one quote at 1x. Jev's leverage rung scales it from here. */
   quoteUsd: Number(env("QUOTE_USD", "40")),
   /** Safety valve on the scaled notional. Does not bind at the default ladder. */
-  maxNotionalUsd: Number(env("MAX_NOTIONAL_USD", "2000")),
+  maxNotionalUsd: Number(env("MAX_NOTIONAL_USD", "500")),
   quoteInsideTicks: Number(env("QUOTE_INSIDE_TICKS", "1")),
   /** How far an Ioc exit crosses the touch so it fills on the spot. */
-  closeSlippageBps: Number(env("CLOSE_SLIPPAGE_BPS", "5")),
+  closeSlippageBps: Number(env("CLOSE_SLIPPAGE_BPS", "25")),
   horizonBlocks: Number(env("HORIZON_BLOCKS", "100")),
   model: env("MODEL", "mock") as "mock" | "jev",
   /** typesafe = official TypeSafe API. gateway = Vercel AI Gateway. */
