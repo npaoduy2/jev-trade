@@ -131,6 +131,8 @@ function paintLatest(coin: string, latest: BlockEvent | null, mark: Mark | null)
     bestBid: mark.bestBid,
     bestAsk: mark.bestAsk,
     spreadBps: mark.spreadBps,
+    // The row prices itself off markPx, so a stale one there outranks a live mid.
+    position: mark.markPx != null ? { ...latest.position, markPx: mark.markPx } : latest.position,
   };
 }
 
@@ -576,6 +578,7 @@ export function useFeed(apiUrl: string): FeedState & { loadTape: () => void } {
       tape: s.tape,
       latest: paintLatest(coin, lastRealDecision(s), s.mark),
       avgLatencyMs: s.avgLatencyMs,
+      mark: s.mark,
     };
   }
 
