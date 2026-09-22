@@ -152,6 +152,7 @@ export function fieldGuide(state: TradeState): string {
     `sizing[rung] = the notional one entry carries at that leverage rung. margin locked is the same at every rung.`,
     `lastTick = the most recent answers you gave, null before the first one. late ticks can put it further back than one tick.`,
     `position.entryVsMidBps = mid against entry, signed, not flipped for a short.`,
+    `position.unrealizedUsd is the venue's, priced at asset.markPx, not at mid. mark and mid differ.`,
     `position.liquidationDistBps = mid to liquidationPx, absolute.`,
     `null = not enough history for that field.`,
   ].join(" ");

@@ -134,9 +134,12 @@ test("evaluate state is the book and live position, not the wallet scoreboard", 
   expect(seen.trades).toEqual(fat.trades);
   expect(seen.position.side).toBe("flat");
   expect("unrealizedUsd" in seen.position).toBe(false);
-  for (const phrase of ["recentfills", "realizedusd", "feesusd", "pnlusd", "pnlpct", "equity", "withdrawable", "horizonticks"]) {
-    expect(text).not.toContain(phrase);
+  // Match the JSON key, not a substring: "unrealizedUsd" contains "realizedUsd"
+  // and is a field Jev is meant to have.
+  for (const key of ["recentFills", "realizedUsd", "feesUsd", "pnlUsd", "pnlPct", "equity", "withdrawable", "horizonTicks"]) {
+    expect(text).not.toContain(`"${key.toLowerCase()}"`);
   }
+  expect(text).toContain('"guide"');
 
   const open = marketFacing(fixture("long"));
   expect(open.position.unrealizedUsd).toBe(-1.25);
