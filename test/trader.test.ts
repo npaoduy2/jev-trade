@@ -77,6 +77,7 @@ const book: Book = {
 function packed(partial: Partial<ModelDecision> & Pick<ModelDecision, "intent" | "bias" | "action">): ModelDecision {
   return {
     trend: "unclear",
+    exitStyle: "cross",
     leverage: 1,
     probabilities: { buy: 0, sell: 0, hold: 1, long: 0.5, short: 0.5, open: 0, close: 0 },
     upIn10: 0.5,
@@ -317,4 +318,16 @@ test("going flat forgets the path so the next position starts clean", async () =
   expect(p.pathBps).toBe("");
   // The cost of crossing is a fact about the book, known with or without a position.
   expect(p.costToCloseBps).toBeGreaterThan(0);
+});
+
+test("a resting exit posts at the touch, a crossing one takes it", () => {
+  const rest = planQuote({ intent: "close", bias: "long", positionSz: 0.08, quoteSz: 0.01, exitStyle: "rest" });
+  expect(rest).toEqual({ side: "sell", size: 0.08, reduceOnly: true, taker: false });
+
+  const cross = planQuote({ intent: "close", bias: "long", positionSz: 0.08, quoteSz: 0.01, exitStyle: "cross" });
+  expect(cross).toEqual({ side: "sell", size: 0.08, reduceOnly: true, taker: true });
+
+  // Saying nothing still crosses, which is what an exit did before there was a choice.
+  const silent = planQuote({ intent: "close", bias: "short", positionSz: -0.08, quoteSz: 0.01 });
+  expect(silent).toEqual({ side: "buy", size: 0.08, reduceOnly: true, taker: true });
 });

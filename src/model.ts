@@ -3,7 +3,7 @@ import { TypeSafeClient } from "@typesafe-ai/sdk";
 import { assertJevCredentials, config } from "./config";
 import type { IndicatorSnap } from "./indicators";
 import { leverageRungs, parseLeverage, quoteAction, type Bias, type Intent } from "./plan";
-import type { Action, Bias as WireBias, Intent as WireIntent, Side, Trend } from "./types";
+import type { Action, Bias as WireBias, ExitStyle, Intent as WireIntent, Side, Trend } from "./types";
 import type { FlowWindow } from "./trades";
 
 /** What the model sees. Compact, relative, human-readable. */
@@ -30,6 +30,13 @@ export interface TradeState {
   flow: { [window: string]: FlowWindow };
   /** Notional one entry would carry at each leverage rung, keyed by the rung. */
   sizing: { [rung: string]: number };
+  /** What this desk has been doing lately. Cost is per round trip, not per tick. */
+  recent: {
+    windowTicks: number;
+    trips: number;
+    holdTicksMedian: number | null;
+    costBps: number | null;
+  };
   /** What Jev answered on the previous tick. null on the first one. */
   lastTick: { trend: Trend; intent: WireIntent; bias: WireBias; leverage: number } | null;
   position: {
@@ -82,6 +89,8 @@ export interface ModelDecision {
   intent: Intent;
   bias: Bias;
   trend: Trend;
+  /** Only meaningful on a close. How the exit leaves the book. */
+  exitStyle: ExitStyle;
   leverage: number;
   probabilities: {
     buy: number;
@@ -125,6 +134,7 @@ export function marketFacing(state: TradeState, read: { trend: Trend } | null = 
     flow: state.flow,
     sizing: state.sizing,
     lastTick: state.lastTick,
+    recent: state.recent,
     position: {
       coin: pos.coin,
       side: pos.side,
@@ -173,6 +183,7 @@ export function fieldGuide(state: TradeState): string {
     `mtf[tf].vol20Bps = stdev of log returns over 20 bars, in bps. changeBps = that interval's last bar against the one before.`,
     `asset = venue context. fundingBps above 0 = longs pay shorts. premiumBps = mark against oracle. openInterestChangeBps = oi against the previous tick.`,
     `sizing[rung] = the notional one entry carries at that leverage rung. margin locked is the same at every rung.`,
+    `recent = your own trading over the last windowTicks. trips = round trips closed, holdTicksMedian = how long you have been holding them, costBps = what those trips cost, in bps of what they traded.`,
     `lastTick = the most recent answers you gave, null before the first one. late ticks can put it further back than one tick.`,
     `position.entryVsMidBps = mid against entry, signed, not flipped for a short.`,
     `position.unrealizedUsd is the venue's, priced at asset.markPx, not at mid. mark and mid differ.`,
@@ -182,7 +193,7 @@ export function fieldGuide(state: TradeState): string {
     `position.peakBps = the best this position has been. fromPeakBps = handed back since. ticksSincePeak = how long since it last set one.`,
     `position.peakVsVol = peakBps over the 1m vol20Bps, the peak in units of this market's own noise.`,
     `position.pathBps = gain in bps at each tick since it opened, oldest first.`,
-    `position.costToCloseBps = half the spread plus the taker fee, what flattening now costs against mid.`,
+    `position.costToCloseBps = half the spread plus the taker fee, what crossing out costs against mid. resting out skips the taker fee.`,
     `null = not enough history for that field.`,
   ].join(" ");
 }
@@ -270,7 +281,8 @@ export function jevActionQuestions(state: TradeState) {
         inputs: GUIDE_POINTER,
       },
       criteria: {
-        close: `flatten all ${pos.size} now, an Ioc that crosses the touch`,
+        close_now: `flatten all ${pos.size} at once, an Ioc that crosses the touch and pays the taker fee`,
+        close_rest: `flatten all ${pos.size} with a post-only order at the touch, cheaper by the taker fee, and it may not fill this tick`,
         hold: "keep the position, and let any unfilled part of the entry keep working",
       },
     },
@@ -289,6 +301,7 @@ interface Packed {
   intent: Intent;
   bias: Bias;
   trend: Trend;
+  exitStyle?: ExitStyle;
   leverage: number;
   longP: number;
   shortP: number;
@@ -314,6 +327,7 @@ function pack(o: Packed): ModelDecision {
     intent: o.intent,
     bias: o.bias,
     trend: o.trend,
+    exitStyle: o.exitStyle ?? "cross",
     leverage: o.leverage,
     probabilities: {
       buy: action === "buy" ? sized : 0,
@@ -401,14 +415,17 @@ export function decideFromJevAnswers(
       holdP: act.wait!,
     });
   }
-  const act = choiceProbs(answers.manage, ["close", "hold"]);
+  const keys = ["close_now", "close_rest", "hold"] as const;
+  const act = choiceProbs(answers.manage, keys);
+  const managed = pick(answers.manage?.choice, keys, "hold");
   return pack({
     ...common,
-    intent: pick(answers.manage?.choice, ["close", "hold"] as const, "hold"),
+    intent: managed === "hold" ? "hold" : "close",
+    exitStyle: managed === "close_rest" ? "rest" : "cross",
     // Closing a long sells. The stance is the position being held, not a fresh view.
     bias: positionSide,
     openP: 0,
-    closeP: act.close!,
+    closeP: act.close_now! + act.close_rest!,
     holdP: act.hold!,
   });
 }

@@ -1,6 +1,6 @@
-import type { Action, Bias, Intent, Side } from "./types";
+import type { Action, Bias, ExitStyle, Intent, Side } from "./types";
 
-export type { Bias, Intent };
+export type { Bias, ExitStyle, Intent };
 
 /** Hyperliquid integer rungs up to the coin's max leverage. */
 export function leverageRungs(max: number): number[] {
@@ -47,6 +47,8 @@ export function planQuote(opts: {
   bias: Bias;
   positionSz: number;
   quoteSz: number;
+  /** How an exit leaves. `rest` posts at the touch instead of crossing it. */
+  exitStyle?: ExitStyle;
 }): QuotePlan | null {
   if (opts.intent === "hold") return null;
   if (opts.intent === "open") {
@@ -55,7 +57,8 @@ export function planQuote(opts: {
       : null;
   }
   // Close flattens the live book. Long/short is the stance, not which side to reduce.
-  if (opts.positionSz > 0) return { side: "sell", size: opts.positionSz, reduceOnly: true, taker: true };
-  if (opts.positionSz < 0) return { side: "buy", size: -opts.positionSz, reduceOnly: true, taker: true };
+  const taker = opts.exitStyle !== "rest";
+  if (opts.positionSz > 0) return { side: "sell", size: opts.positionSz, reduceOnly: true, taker };
+  if (opts.positionSz < 0) return { side: "buy", size: -opts.positionSz, reduceOnly: true, taker };
   return null;
 }

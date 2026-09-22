@@ -9,6 +9,8 @@ export type Intent = "open" | "close" | "hold";
  * strings past 2^53, so they stay strings and never round-trip through Number.
  */
 export type OrderId = string | number;
+/** How an exit leaves the book. `cross` takes the touch, `rest` posts at it. */
+export type ExitStyle = "cross" | "rest";
 /** Jev's read of the multi-timeframe picture, taken before it picks a side. */
 export type Trend = "up" | "down" | "range" | "unclear";
 
@@ -79,6 +81,7 @@ export interface Decision {
   intent?: Intent;
   bias?: Bias;
   trend?: Trend;
+  exitStyle?: ExitStyle;
   leverage?: number;
   probabilities: {
     buy: number;

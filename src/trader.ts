@@ -17,6 +17,8 @@ const JEV_PAUSE_MS = 30_000;
 const REFRESH_MS = 10_000;
 /** How much of a position's gain history rides along. Bounds the payload. */
 const PATH_SAMPLES = 30;
+/** Window Jev is shown its own recent trading over. */
+const RECENT_TICKS = 30;
 
 export function jevUnavailable(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
@@ -46,7 +48,10 @@ export class Trader {
   /** The entry Jev asked for, kept until it is filled, closed, or stood down. */
   private entry: { side: Side; target: number } | null = null;
   /** Where the open position has been. Reset the moment it goes flat. */
-  private track: { openedAt: number; peak: number; peakAt: number; path: number[] } | null = null;
+  private track: { openedAt: number; peak: number; peakAt: number; path: number[]; notionalUsd: number } | null = null;
+  /** Round trips this desk has closed, and the running fee total per tick. */
+  private trips: { closedAt: number; heldTicks: number; notionalUsd: number }[] = [];
+  private feeTrail: { block: number; usd: number }[] = [];
 
   constructor(
     private market: VenueMarket,
@@ -102,6 +107,7 @@ export class Trader {
           bias: decision.bias,
           positionSz: this.position.sz,
           quoteSz: this.market.quoteSize(book.mid, decision.leverage),
+          exitStyle: decision.exitStyle,
         });
         timing.loopMs = Math.round(performance.now() - t0);
         this.emit(block, book, decision, null, false, timing);
@@ -140,9 +146,10 @@ export class Trader {
     const seq = ++this.sendSeq;
     this.exchangeTail = this.exchangeTail.catch(() => {}).then(async () => {
       if (seq !== this.sendSeq) return;
-      // An exit skips the leverage write: nothing about it depends on margin, and
-      // the extra round trip is pure delay on the one order that has to land now.
-      if (!plan.taker) {
+      // An exit skips the leverage write whichever way it leaves: nothing about
+      // it depends on margin, and the extra call is delay on the order that has
+      // to land. Keying this off `taker` missed a resting exit.
+      if (!plan.reduceOnly) {
         await this.market.setLeverage(decision.leverage);
         if (seq !== this.sendSeq) return;
       }
@@ -255,18 +262,45 @@ export class Trader {
    * peaked at +45 and one that never cleared +2 read the same from unrealized
    * alone, and they are not the same position.
    */
-  private trackPath(block: number, gainBps: number | null) {
+  private trackPath(block: number, gainBps: number | null, notionalUsd = 0) {
     if (gainBps == null) {
+      if (this.track) {
+        this.trips.push({ closedAt: block, heldTicks: block - this.track.openedAt + 1, notionalUsd: this.track.notionalUsd });
+        if (this.trips.length > 50) this.trips.shift();
+      }
       this.track = null;
       return;
     }
-    if (!this.track) this.track = { openedAt: block, peak: gainBps, peakAt: block, path: [] };
+    if (!this.track) this.track = { openedAt: block, peak: gainBps, peakAt: block, path: [], notionalUsd };
+    if (notionalUsd > this.track.notionalUsd) this.track.notionalUsd = notionalUsd;
     if (gainBps > this.track.peak) {
       this.track.peak = gainBps;
       this.track.peakAt = block;
     }
     this.track.path.push(round(gainBps, 1));
     if (this.track.path.length > PATH_SAMPLES) this.track.path.shift();
+  }
+
+  /**
+   * What this desk has been doing lately, in its own terms. Cost is charged per
+   * round trip, not per decision, so how often it goes around is the number
+   * that matters and nothing in the state carried it.
+   */
+  private recentTrading(block: number): TradeState["recent"] {
+    const since = block - RECENT_TICKS;
+    const trips = this.trips.filter((t) => t.closedAt > since);
+    const held = this.trips.slice(-10).map((t) => t.heldTicks).sort((a, b) => a - b);
+    const old = this.feeTrail.find((f) => f.block > since) ?? this.feeTrail[0];
+    // In bps of what was actually traded, so it sits beside peakBps and the
+    // moves rather than leaking how big this account is.
+    const spent = old ? this.totals.gasUsd - old.usd : 0;
+    const traded = trips.reduce((s, t) => s + t.notionalUsd, 0);
+    return {
+      windowTicks: RECENT_TICKS,
+      trips: trips.length,
+      holdTicksMedian: held.length ? held[Math.floor(held.length / 2)]! : null,
+      costBps: traded > 0 ? round((spent / traded) * 10_000, 2) : null,
+    };
   }
 
   private buildState(block: number, book: Book): TradeState {
@@ -297,7 +331,9 @@ export class Trader {
     const entryVsMid = bpsBetween(entry, book.mid);
     // Flip the short so that above zero always means the position is winning.
     const gainBps = side === "flat" || entryVsMid == null ? null : side === "short" ? -entryVsMid : entryVsMid;
-    this.trackPath(block, gainBps);
+    this.trackPath(block, gainBps, Math.abs(posSz) * book.mid);
+    this.feeTrail.push({ block, usd: this.totals.gasUsd });
+    if (this.feeTrail.length > RECENT_TICKS + 10) this.feeTrail.shift();
     const t = this.track;
     const vol = mtf["1m"]?.vol20Bps ?? null;
     return {
@@ -318,6 +354,7 @@ export class Trader {
       flow: this.trades ? roundFlow(this.trades.flow(block, flowWindows())) : {},
       sizing,
       lastTick: this.lastAnswer(),
+      recent: this.recentTrading(block),
       position: {
         coin: this.market.coin,
         side,
@@ -397,6 +434,7 @@ export class Trader {
           intent: decision.intent,
           bias: decision.bias,
           trend: decision.trend,
+          exitStyle: decision.exitStyle,
           leverage: decision.leverage,
           probabilities: decision.probabilities,
           upIn10: decision.upIn10,

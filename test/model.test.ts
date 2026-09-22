@@ -26,6 +26,7 @@ function fixture(side: TradeState["position"]["side"]): TradeState {
     flow: { "5t": { count: 0, buySz: 0, sellSz: 0, cvdSz: 0, imbalance: 0, maxBuySz: 0, maxSellSz: 0 } },
     sizing: { "1": 40, "2": 80, "3": 120, "5": 200, "10": 400, "20": 800, "40": 1600 },
     lastTick: null,
+    recent: { windowTicks: 30, trips: 2, holdTicksMedian: 3, costBps: 6.1 },
     position: {
       coin: "BTC",
       side,
@@ -99,7 +100,8 @@ test("Jev reads the trend first, then names the actions, without coaching a pick
   expect(flat).toContain("long, short, or wait on btc?");
   expect(flat).toContain('"wait":"place nothing');
   expect(long).toContain("close or hold the long on btc?");
-  expect(long).toContain('"close":"flatten all');
+  expect(long).toContain('"close_now":"flatten all');
+  expect(long).toContain('"close_rest":"flatten all');
 });
 
 test("an open position is only asked to keep or close it", () => {
@@ -204,7 +206,7 @@ test("an unreadable side waits instead of opening long", () => {
 
 test("closing an open position trades against the side being held", () => {
   const long = decideFromJevAnswers(
-    { trend: { choice: "down" }, manage: { choice: "close" }, leverage: { choice: "3" } },
+    { trend: { choice: "down" }, manage: { choice: "close_now" }, leverage: { choice: "3" } },
     "long",
     40,
     3,
@@ -213,7 +215,7 @@ test("closing an open position trades against the side being held", () => {
   expect(long.action).toBe("sell");
 
   const short = decideFromJevAnswers(
-    { trend: { choice: "up" }, manage: { choice: "close" }, leverage: { choice: "3" } },
+    { trend: { choice: "up" }, manage: { choice: "close_now" }, leverage: { choice: "3" } },
     "short",
     40,
     3,
@@ -294,4 +296,28 @@ test("Jev sees its own previous answer when one exists", () => {
   state.lastTick = { trend: "up", intent: "open", bias: "long", leverage: 5 };
   expect(marketFacing(state).lastTick).toEqual(state.lastTick);
   expect(fieldGuide(state)).toContain("lastTick");
+});
+
+test("Jev picks how an exit leaves, and an unreadable answer keeps the position", () => {
+  const cross = decideFromJevAnswers(
+    { trend: { choice: "down" }, manage: { choice: "close_now" } },
+    "long", 40, 3,
+  );
+  expect(cross.intent).toBe("close");
+  expect(cross.exitStyle).toBe("cross");
+
+  const rest = decideFromJevAnswers(
+    { trend: { choice: "down" }, manage: { choice: "close_rest" } },
+    "long", 40, 3,
+  );
+  expect(rest.intent).toBe("close");
+  expect(rest.exitStyle).toBe("rest");
+  // Both are exits, so the close mass is the two of them together.
+  expect(rest.probabilities.close).toBeGreaterThan(0);
+
+  const unreadable = decideFromJevAnswers(
+    { trend: { choice: "down" }, manage: { choice: "sell everything" } },
+    "long", 40, 3,
+  );
+  expect(unreadable.intent).toBe("hold");
 });
