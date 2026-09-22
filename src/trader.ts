@@ -120,7 +120,16 @@ export class Trader {
         if (seq !== this.sendSeq) return;
       }
       const cancel = [...this.orders.keys()].filter((id) => id > 0);
-      const quote = await this.market.send(plan.side, plan.size, book, cancel, plan.reduceOnly, plan.taker);
+      // Price against the touch as it is now, not as it was before Jev answered.
+      // A post-only order priced off a book that aged through the decision and
+      // the leverage write gets rejected for crossing.
+      let live = book;
+      try {
+        live = this.market.readBook();
+      } catch {
+        // No fresher book than the one this tick started with.
+      }
+      const quote = await this.market.send(plan.side, plan.size, live, cancel, plan.reduceOnly, plan.taker);
       if (seq !== this.sendSeq) return;
       this.applyPosted(block, quote);
     });

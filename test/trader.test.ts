@@ -108,13 +108,17 @@ class FakeMarket {
   lastOid: number | null = null;
   cancels = 0;
   sendDelayMs = 0;
+  sentBook: Book | null = null;
+  private live: Book = book;
+  moveBookTo(next: Book) { this.live = next; }
   candleCloses() { return []; }
   tfCloses() { return []; }
   refresh() { return Promise.resolve(); }
-  readBook() { return book; }
+  readBook() { return this.live; }
   quoteSize() { return 0.01; }
   setLeverage(n: number) { return Promise.resolve(n); }
-  async send(side: Side, size: number, _book: Book, cancel: number[]): Promise<Quote> {
+  async send(side: Side, size: number, book_: Book, cancel: number[]): Promise<Quote> {
+    this.sentBook = book_;
     if (this.sendDelayMs) await Bun.sleep(this.sendDelayMs);
     this.lastOid = 4242;
     return {
@@ -167,4 +171,17 @@ test("a failed Jev call emits late instead of going silent", async () => {
   model.next = new Error("boom");
   await trader.onBlock(1);
   expect(events.some((e) => e.decision?.late === true)).toBe(true);
+});
+
+test("an entry is priced off the book at send time, not the one the tick opened with", async () => {
+  const model = new ScriptModel();
+  const market = new FakeMarket();
+  const { trader } = desk(model, market);
+  model.next = packed({ intent: "open", bias: "long", action: "buy" });
+  // The touch moves while Jev is answering, the way it does across two rounds.
+  model.delayMs = 20;
+  market.moveBookTo({ ...book, bid: 120, ask: 120.2, mid: 120.1 });
+  await trader.onBlock(1);
+  await Bun.sleep(60);
+  expect(market.sentBook?.mid).toBe(120.1);
 });
