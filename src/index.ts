@@ -1,6 +1,6 @@
 import { config } from "./config";
 import { Feed } from "./feed";
-import { Market, pullResting } from "./market";
+import { Market, pullResting, repeatMeansGiveUp } from "./market";
 import { createModel } from "./model";
 import { loadSleeves } from "./sleeves";
 import { startServer, type SleeveView } from "./server";
@@ -97,15 +97,17 @@ console.log(`jev-trade ${meta.sleeves.map((s) => s.label).join(" ")} model=${met
 
 /** A resting entry outlives the process that placed it, so pull it on the way out. */
 const SHUTDOWN_MS = 5_000;
-let leaving = false;
+let leavingAt = 0;
 
 async function shutdown(signal: string) {
-  if (leaving) {
-    // A second signal means stop waiting on the venue.
+  const now = Date.now();
+  if (leavingAt) {
+    // Only a person pressing again, a moment later, means stop waiting.
+    if (!repeatMeansGiveUp(leavingAt, now)) return;
     console.error(`${signal} again, leaving orders as they are`);
     process.exit(130);
   }
-  leaving = true;
+  leavingAt = now;
   console.log(`${signal}: pulling resting orders`);
   const pulled = await pullResting(markets, SHUTDOWN_MS);
   if (pulled == null) console.error(`shutdown: venue did not answer in ${SHUTDOWN_MS}ms, orders may still rest`);

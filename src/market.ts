@@ -381,6 +381,15 @@ export class Market {
 }
 
 /**
+ * Whether a repeated stop signal means stop waiting on the venue. A process
+ * manager can send the same signal twice in one breath, which is not a person
+ * pressing again because the exit is taking too long.
+ */
+export function repeatMeansGiveUp(firstAt: number, now: number, graceMs = 1_000): boolean {
+  return firstAt > 0 && now - firstAt >= graceMs;
+}
+
+/**
  * Pull every order this process left resting. Returns the ids it cancelled, or
  * null when the venue did not answer in time. One sleeve failing does not stop
  * the rest: a stuck cancel must not strand the others on the book.

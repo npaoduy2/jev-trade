@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { pullResting, type Market } from "../src/market";
+import { pullResting, repeatMeansGiveUp, type Market } from "../src/market";
 import type { Model, ModelDecision } from "../src/model";
 import { leverageRungs, liveIntent, parseLeverage, planQuote, quoteAction } from "../src/plan";
 import { TradeFeed } from "../src/trades";
@@ -251,4 +251,17 @@ test("a close drops the entry, so a later hold does not revive it", async () => 
   await trader.onBlock(3);
   await Bun.sleep(20);
   expect(market.cancels).toBeGreaterThan(before);
+});
+
+test("a stop signal repeated in the same breath does not abandon the cancel", () => {
+  const first = 1_000_000;
+  // A process manager firing SIGTERM twice back to back.
+  expect(repeatMeansGiveUp(first, first)).toBe(false);
+  expect(repeatMeansGiveUp(first, first + 5)).toBe(false);
+  expect(repeatMeansGiveUp(first, first + 999)).toBe(false);
+  // A person pressing again because the exit is taking too long.
+  expect(repeatMeansGiveUp(first, first + 1_000)).toBe(true);
+  expect(repeatMeansGiveUp(first, first + 4_000)).toBe(true);
+  // Nothing in flight yet.
+  expect(repeatMeansGiveUp(0, first)).toBe(false);
 });
