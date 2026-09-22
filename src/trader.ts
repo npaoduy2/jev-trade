@@ -120,7 +120,8 @@ export class Trader {
         // A maker entry fills in pieces. Once any of it lands, the next tick asks
         // whether to keep the position, and pulling the rest on that answer would
         // strand Jev at a fraction of the size it asked for.
-        else if (!this.entryWorking()) this.enqueueStandDown();
+        else if (this.entryWorking()) this.enqueueEntryRefresh(block);
+        else this.enqueueStandDown();
       } catch (e) {
         const msg = (e as Error).message;
         if (jevUnavailable(e)) {
@@ -169,6 +170,34 @@ export class Trader {
         // No fresher book than the one this tick started with.
       }
       const quote = await this.market.send(plan.side, plan.size, live, cancel, plan.reduceOnly, plan.taker);
+      if (seq !== this.sendSeq) return;
+      this.applyPosted(block, quote);
+    });
+  }
+
+  /**
+   * Re-price the unfilled part of an entry at the touch it would be placed at
+   * now. Leaving it alone let an order rest at a price sixteen ticks old and
+   * fill on a view Jev had long since re-taken. `send` modifies in place when
+   * the price moved and does nothing at all when it did not.
+   */
+  private enqueueEntryRefresh(block: number) {
+    const e = this.entry;
+    if (!e) return;
+    const filled = e.side === "buy" ? this.position.sz : -this.position.sz;
+    const left = e.target - filled;
+    if (left <= 0) return;
+    const seq = ++this.sendSeq;
+    this.exchangeTail = this.exchangeTail.catch(() => {}).then(async () => {
+      if (seq !== this.sendSeq) return;
+      let live: Book;
+      try {
+        live = this.market.readBook();
+      } catch {
+        return;
+      }
+      const cancel = [...this.orders.keys()].filter(isVenueOrderId);
+      const quote = await this.market.send(e.side, left, live, cancel, false, false);
       if (seq !== this.sendSeq) return;
       this.applyPosted(block, quote);
     });

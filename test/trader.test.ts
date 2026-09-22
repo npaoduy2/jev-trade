@@ -122,6 +122,7 @@ class FakeMarket {
   cancels = 0;
   sendDelayMs = 0;
   sentBook: Book | null = null;
+  sends = 0;
   private live: Book = book;
   moveBookTo(next: Book) { this.live = next; }
   candleCloses() { return []; }
@@ -132,6 +133,7 @@ class FakeMarket {
   setLeverage(n: number) { return Promise.resolve(n); }
   async send(side: Side, size: number, book_: Book, cancel: number[]): Promise<Quote> {
     this.sentBook = book_;
+    this.sends++;
     if (this.sendDelayMs) await Bun.sleep(this.sendDelayMs);
     this.lastOid = 4242;
     return {
@@ -382,4 +384,39 @@ test("nothing to rebuild leaves a flat desk flat", async () => {
   await trader.onBlock(1);
   expect(model.seen!.position.peakBps).toBe(null);
   expect(model.seen!.recent.trips).toBe(0);
+});
+
+test("a working entry is re-priced at the touch it would be placed at now", async () => {
+  const model = new ScriptModel();
+  const market = new FakeMarket();
+  const { trader } = desk(model, market);
+  const feed = new TradeFeed();
+  trader.attachTradeFeed(feed);
+
+  model.next = packed({ intent: "open", bias: "long", action: "buy" });
+  await trader.onBlock(1);
+  await Bun.sleep(20);
+  const afterOpen = market.sends;
+  feed.pushPrint({ block: 2, price: 99.8, size: 0.003, side: "sell" });
+
+  // The market walks away while the rest of the entry is still unfilled.
+  market.moveBookTo({ ...book, bid: 104.9, ask: 105.1, mid: 105 });
+  model.next = packed({ intent: "hold", bias: "long", action: "hold" });
+  await trader.onBlock(2);
+  await Bun.sleep(30);
+
+  expect(market.cancels).toBe(0);
+  expect(market.sends).toBeGreaterThan(afterOpen);
+  // Priced against the book as it is now, not the one the entry was placed on.
+  expect(market.sentBook?.mid).toBe(105);
+});
+
+test("a hold with nothing left to work still stands the book down", async () => {
+  const model = new ScriptModel();
+  const market = new FakeMarket();
+  const { trader } = desk(model, market);
+  model.next = packed({ intent: "hold", bias: "long", action: "hold" });
+  await trader.onBlock(1);
+  await Bun.sleep(30);
+  expect(market.cancels).toBeGreaterThan(0);
 });
