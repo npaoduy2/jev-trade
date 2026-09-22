@@ -70,30 +70,46 @@ export type IndicatorSnap = {
   sma20: number | null;
   sma50: number | null;
   ema20: number | null;
+  ema200: number | null;
   midVsSma20Bps: number | null;
   midVsSma50Bps: number | null;
+  midVsEma200Bps: number | null;
+  ema20VsEma200Bps: number | null;
   rsi14: number | null;
   vol20Bps: number | null;
   high20: number | null;
   low20: number | null;
   rangePos20: number | null;
+  changeBps: number | null;
 };
 
+/**
+ * One timeframe read. The same shape for every interval so the set can be
+ * scanned across timeframes. `mid` is the live mid, so `midVs*` compares the
+ * price right now against that interval's averages.
+ */
 export function snapshotIndicators(closes: number[], mid: number): IndicatorSnap {
   const s20 = sma(closes, 20);
   const s50 = sma(closes, 50);
+  const e20 = ema(closes, 20);
+  const e200 = ema(closes, 200);
   const win = rangeWindow(closes, 20);
+  const n = closes.length;
   return {
     sma20: s20,
     sma50: s50,
-    ema20: ema(closes, 20),
+    ema20: e20,
+    ema200: e200,
     midVsSma20Bps: bpsBetween(s20, mid),
     midVsSma50Bps: bpsBetween(s50, mid),
+    midVsEma200Bps: bpsBetween(e200, mid),
+    ema20VsEma200Bps: e20 != null && e200 != null ? bpsBetween(e200, e20) : null,
     rsi14: rsi(closes, 14),
     vol20Bps: realizedVolBps(closes, 20),
     high20: win?.high ?? null,
     low20: win?.low ?? null,
     rangePos20: win?.pos ?? null,
+    changeBps: n > 1 ? bpsBetween(closes[n - 2]!, closes[n - 1]!) : null,
   };
 }
 

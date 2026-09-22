@@ -42,6 +42,23 @@
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+/* Jev's read of the five intervals, taken before it picks a side. Stays on
+   mobile, where the probability bars are hidden. */
+.trendLine {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+.trendLabel {
+  color: var(--muted);
+  letter-spacing: 0.08em;
+}
+.trendWord {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
 
 .bookLine {
   font-weight: 700;

@@ -75,6 +75,7 @@ const book: Book = {
 
 function packed(partial: Partial<ModelDecision> & Pick<ModelDecision, "intent" | "bias" | "action">): ModelDecision {
   return {
+    trend: "unclear",
     leverage: 1,
     probabilities: { buy: 0, sell: 0, hold: 1, long: 0.5, short: 0.5, open: 0, close: 0 },
     upIn10: 0.5,
@@ -108,6 +109,7 @@ class FakeMarket {
   cancels = 0;
   sendDelayMs = 0;
   candleCloses() { return []; }
+  tfCloses() { return []; }
   refresh() { return Promise.resolve(); }
   readBook() { return book; }
   quoteSize() { return 0.01; }

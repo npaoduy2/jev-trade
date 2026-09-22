@@ -4,6 +4,8 @@ export type Side = "buy" | "sell";
 export type Bias = "long" | "short";
 /** `hold` posts nothing and pulls any resting quote. */
 export type Intent = "open" | "close" | "hold";
+/** Jev's read of the multi-timeframe picture, taken before it picks a side. */
+export type Trend = "up" | "down" | "range" | "unclear";
 
 export interface Book {
   block: number;
@@ -71,6 +73,7 @@ export interface Decision {
   action: Action;
   intent?: Intent;
   bias?: Bias;
+  trend?: Trend;
   leverage?: number;
   probabilities: {
     buy: number;

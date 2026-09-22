@@ -2,6 +2,7 @@ import { ApiRequestError, ExchangeClient, HttpTransport, InfoClient } from "@nkt
 import { formatPrice, formatSize, SymbolConverter } from "@nktkas/hyperliquid/utils";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { config } from "./config";
+import type { HigherTf } from "./timeframes";
 import { accountFromClearinghouse, fillDir, FillPnlBook, spotUsdc, type ClearinghouseLike, type FillPnlLike, type SpotStateLike, type SpotUsdc, type VenueAccount } from "./account";
 import { quotePrice, takerPrice } from "./book";
 import type { Feed } from "./feed";
@@ -45,8 +46,13 @@ export class Market {
     return this.feed.assetCtx;
   }
 
-  candleCloses(limit = 80) {
+  candleCloses(limit = 500) {
     return this.feed.chart.closes(limit);
+  }
+
+  /** Closes for one higher interval. 1m stays on the live candle socket. */
+  tfCloses(tf: HigherTf) {
+    return this.feed.tfs.series(tf);
   }
 
   constructor(private feed: Feed, sleeve: SleeveConfig) {
@@ -63,8 +69,16 @@ export class Market {
     return this.wallet?.address ?? null;
   }
 
-  quoteSize(mid: number): number {
-    return lot(config.quoteUsd / Math.max(mid, 1e-9), this.szDecimals);
+  /**
+   * Exposure for one entry, scaled by the leverage rung Jev picked. Conviction has
+   * to reach the notional to reach the PnL: the venue multiplies size by the price
+   * move, never by leverage. Margin stays `quoteUsd` at every rung, since notional
+   * is `quoteUsd * lev` and initial margin is notional over lev.
+   */
+  quoteSize(mid: number, leverage = 1): number {
+    const rung = Math.max(1, Math.min(this.maxLeverage, Math.floor(Number(leverage) || 1)));
+    const notional = Math.min(config.quoteUsd * rung, config.maxNotionalUsd);
+    return lot(notional / Math.max(mid, 1e-9), this.szDecimals);
   }
 
   async init() {

@@ -36,12 +36,17 @@ export function assertJevCredentials(
 }
 
 const hlTestnet = env("HL_TESTNET", "true") !== "false";
+const tickMs = Number(env("TICK_MS", "60000"));
+// Half a tick, clamped, so one slow answer costs at most the tick it runs in.
+const jevDeadlineMs = Number(env("JEV_DEADLINE_MS", "")) || Math.max(4_000, Math.min(20_000, Math.round(tickMs / 2)));
 const jevProvider = resolveJevProvider(process.env);
 const jevModelId = resolveJevModelId(process.env, jevProvider);
 
 export const config = {
   hlTestnet,
-  tickMs: Number(env("TICK_MS", "2000")),
+  tickMs,
+  /** How long Jev has to answer one tick before the tick is marked late. */
+  jevDeadlineMs,
   /** Book/price prints for the chart. Independent of Jev ticks. */
   priceMs: Math.max(50, Number(env("PRICE_MS", "200"))),
   explorerTx: hlTestnet
@@ -49,8 +54,10 @@ export const config = {
     : "https://app.hyperliquid.xyz/explorer/tx/",
   privateKey: env("PRIVATE_KEY"),
   dryRun: env("DRY_RUN") === "true",
-  /** Target notional of one post-only quote. */
+  /** Notional of one quote at 1x. Jev's leverage rung scales it from here. */
   quoteUsd: Number(env("QUOTE_USD", "40")),
+  /** Safety valve on the scaled notional. Does not bind at the default ladder. */
+  maxNotionalUsd: Number(env("MAX_NOTIONAL_USD", "2000")),
   quoteInsideTicks: Number(env("QUOTE_INSIDE_TICKS", "1")),
   /** How far an Ioc exit crosses the touch so it fills on the spot. */
   closeSlippageBps: Number(env("CLOSE_SLIPPAGE_BPS", "5")),

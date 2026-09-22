@@ -5,6 +5,7 @@ import { bookFromLevels } from "./book";
 import { CHART_INTERVAL, VenueChart } from "./chart";
 import { parseAssetCtx, type AssetCtx } from "./indicators";
 import { sameCoin } from "./sleeves";
+import { Timeframes } from "./timeframes";
 import { TradeFeed } from "./trades";
 
 const INFO_URL = (testnet: boolean) =>
@@ -19,6 +20,7 @@ const WS_URL = (testnet: boolean) =>
 export class Feed {
   readonly trades = new TradeFeed();
   readonly chart = new VenueChart();
+  readonly tfs = new Timeframes();
   assetCtx: AssetCtx | null = null;
   book: Book | null = null;
   tick = 0;
@@ -43,12 +45,15 @@ export class Feed {
     await this.chart.loadCandles(this.coin).catch((e) => {
       console.warn(`${this.coin} candles: ${(e as Error).message.slice(0, 160)}`);
     });
+    // Higher intervals come over REST. Block once so the first tick sees them.
+    await this.tfs.refresh(this.coin);
     this.pollAssetCtx().catch(() => {});
     this.openSocket();
     setInterval(() => this.maybeTick(), config.tickMs);
     setInterval(() => { if (!this.ws || this.ws.readyState !== WebSocket.OPEN) this.snapshot().catch(() => {}); }, 2_000);
     setInterval(() => this.pollTrades().catch(() => {}), 2_000);
     setInterval(() => this.pollAssetCtx().catch(() => {}), 15_000);
+    setInterval(() => this.tfs.refresh(this.coin).catch(() => {}), 60_000);
     this.pollTrades().catch(() => {});
   }
 

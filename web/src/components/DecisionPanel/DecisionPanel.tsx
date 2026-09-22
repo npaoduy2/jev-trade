@@ -85,6 +85,10 @@ export default function DecisionPanel({ latest, waiting = false }: DecisionPanel
   const decided = decision !== null && !late && (chosen !== null || held);
   const pctOf = (p: number | undefined) => (decided ? fmtPct(p ?? 0) : "-");
 
+  const trend = decided ? (decision?.trend ?? null) : null;
+  const trendColor =
+    trend === "up" ? "var(--buy-ink)" : trend === "down" ? "var(--sell-ink)" : "var(--ink-2)";
+
   const headline = decided ? fmtCall(decision) || "LATE" : "LATE";
   const headlineColor = held
     ? "var(--ink-2)"
@@ -107,6 +111,15 @@ export default function DecisionPanel({ latest, waiting = false }: DecisionPanel
               <span className={styles.metaLine}>{decision.latencyMs} ms</span>
             ) : null}
           </div>
+
+          {trend ? (
+            <div className={styles.trendLine}>
+              <span className={styles.trendLabel}>TREND</span>
+              <span className={styles.trendWord} style={{ color: trendColor }}>
+                {trend}
+              </span>
+            </div>
+          ) : null}
 
           <div className={styles.bars}>
             <BarRow

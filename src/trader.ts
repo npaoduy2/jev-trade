@@ -1,9 +1,10 @@
 import { config } from "./config";
 import { bpsBetween, snapshotIndicators, venueFeatures } from "./indicators";
+import { HIGHER_TFS } from "./timeframes";
 import type { Market } from "./market";
 import type { Model, ModelDecision, TradeState } from "./model";
-import { planQuote, type QuotePlan } from "./plan";
-import { aggregateFills, emptySummary, takeLiveFills, takeSimFills, type Resting, type TradeFeed } from "./trades";
+import { leverageRungs, planQuote, type QuotePlan } from "./plan";
+import { aggregateFills, emptySummary, takeLiveFills, takeSimFills, type FlowWindow, type Resting, type TradeFeed } from "./trades";
 import type { BlockEvent, Book, Fill, PricePoint, Quote, Side, Timing, Totals } from "./types";
 
 const emptyTotals = (): Totals => ({
@@ -36,6 +37,7 @@ export class Trader {
   private position = { sz: 0, costUsd: 0 };
   private totals: Totals = emptyTotals();
   private jevPauseUntil = 0;
+  private lastOi: number | null = null;
 
   constructor(
     private market: Market,
@@ -84,7 +86,7 @@ export class Trader {
           intent: decision.intent,
           bias: decision.bias,
           positionSz: this.position.sz,
-          quoteSz: this.market.quoteSize(book.mid),
+          quoteSz: this.market.quoteSize(book.mid, decision.leverage),
         });
         timing.loopMs = Math.round(performance.now() - t0);
         this.emit(block, book, decision, null, false, timing);
@@ -200,6 +202,17 @@ export class Trader {
     return sz;
   }
 
+  /** Jev's newest answers. Late ticks can push this further back than one tick. */
+  private lastAnswer(): TradeState["lastTick"] {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const d = this.history[i]!.decision;
+      if (d && !d.late && d.trend && d.intent && d.bias && d.leverage != null) {
+        return { trend: d.trend, intent: d.intent, bias: d.bias, leverage: d.leverage };
+      }
+    }
+    return null;
+  }
+
   private buildState(block: number, book: Book): TradeState {
     this.syncFromVenue();
     const m = this.mids, n = m.length, H = config.horizonBlocks;
@@ -212,8 +225,18 @@ export class Trader {
     const a = this.market.account;
     const entry = this.entryPrice();
     const unrealized = a ? a.unrealizedUsd : this.unrealizedUsd(book.mid);
-    const indicators = snapNums(snapshotIndicators(this.market.candleCloses(80), book.mid));
+    const mtf: TradeState["mtf"] = { "1m": snapNums(snapshotIndicators(this.market.candleCloses(500), book.mid)) };
+    for (const tf of HIGHER_TFS) mtf[tf] = snapNums(snapshotIndicators(this.market.tfCloses(tf), book.mid));
     const asset = snapNums(venueFeatures(this.market.assetCtx, book.mid));
+    const oiNow = asset.openInterest;
+    const oiChangeBps = this.lastOi != null && oiNow != null ? bpsBetween(this.lastOi, oiNow) : null;
+    if (oiNow != null) this.lastOi = oiNow;
+    const sizing: TradeState["sizing"] = {};
+    for (const rung of leverageRungs(this.market.maxLeverage)) {
+      sizing[String(rung)] = round(this.market.quoteSize(book.mid, rung) * book.mid, 2);
+    }
+    const liqPx = a?.liquidationPx ?? null;
+    const liqDist = liqPx != null ? Math.abs(bpsBetween(book.mid, liqPx) ?? Number.NaN) : null;
     return {
       coin: this.market.coin,
       market: this.market.pair,
@@ -228,6 +251,9 @@ export class Trader {
       recentMids: sampled.map((x) => x.toFixed(6)).join(" "),
       trades: this.trades ? this.trades.summary(H, block) : emptySummary(),
       recentTrades: (this.trades?.recent(10) ?? []).map((t) => `${t.block} ${t.side} ${round(t.size, 1)} @ ${t.price.toFixed(6)}`),
+      flow: this.trades ? roundFlow(this.trades.flow(block, flowWindows())) : {},
+      sizing,
+      lastTick: this.lastAnswer(),
       position: {
         coin: this.market.coin,
         side: posSz > 0 ? "long" : posSz < 0 ? "short" : "flat",
@@ -236,11 +262,12 @@ export class Trader {
         entry,
         leverage: a?.leverage ?? null,
         liquidationPx: a?.liquidationPx ?? null,
-        distanceBps: rnull(bpsBetween(entry, book.mid), 2),
+        entryVsMidBps: rnull(bpsBetween(entry, book.mid), 2),
+        liquidationDistBps: rnull(liqDist, 2),
         unrealizedUsd: round(unrealized, 4),
       },
-      indicators,
-      asset: { ...asset, maxLeverage: this.market.maxLeverage },
+      mtf,
+      asset: { ...asset, openInterestChangeBps: rnull(oiChangeBps, 2), maxLeverage: this.market.maxLeverage },
       maxLeverage: this.market.maxLeverage,
     };
   }
@@ -298,6 +325,7 @@ export class Trader {
           action: decision.action,
           intent: decision.intent,
           bias: decision.bias,
+          trend: decision.trend,
           leverage: decision.leverage,
           probabilities: decision.probabilities,
           upIn10: decision.upIn10,
@@ -325,7 +353,28 @@ export class Trader {
   }
 }
 
+/** Near, middle, and the full lookback. Deduped so a short horizon cannot collapse them. */
+function flowWindows(): number[] {
+  return [...new Set([5, 20, config.horizonBlocks].filter((w) => w > 0))].sort((a, b) => a - b);
+}
+
 const round = (x: number, d: number) => Math.round(x * 10 ** d) / 10 ** d;
+
+function roundFlow(flow: Record<string, FlowWindow>): Record<string, FlowWindow> {
+  const out: Record<string, FlowWindow> = {};
+  for (const [w, v] of Object.entries(flow)) {
+    out[w] = {
+      count: v.count,
+      buySz: round(v.buySz, 3),
+      sellSz: round(v.sellSz, 3),
+      cvdSz: round(v.cvdSz, 3),
+      imbalance: round(v.imbalance, 3),
+      maxBuySz: round(v.maxBuySz, 3),
+      maxSellSz: round(v.maxSellSz, 3),
+    };
+  }
+  return out;
+}
 const rnull = (x: number | null, d: number) => (x == null || !Number.isFinite(x) ? null : round(x, d));
 
 function snapNums<T extends Record<string, number | null>>(obj: T): T {

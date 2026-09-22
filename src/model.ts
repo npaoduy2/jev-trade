@@ -1,8 +1,10 @@
 import { experimental_evaluate as evaluate } from "ai";
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import { assertJevCredentials, config } from "./config";
-import { leverageRungs, liveIntent, parseLeverage, quoteAction, type Bias, type Intent } from "./plan";
-import type { Action, Side } from "./types";
+import type { IndicatorSnap } from "./indicators";
+import { leverageRungs, parseLeverage, quoteAction, type Bias, type Intent } from "./plan";
+import type { Action, Bias as WireBias, Intent as WireIntent, Side, Trend } from "./types";
+import type { FlowWindow } from "./trades";
 
 /** What the model sees. Compact, relative, human-readable. */
 export interface TradeState {
@@ -22,6 +24,12 @@ export interface TradeState {
   /** Taker prints in the lookback window. cvdSz = taker buy size minus taker sell size. */
   trades: { count: number; buySz: number; sellSz: number; cvdSz: number; vwap: number | null; lastPrice: number | null; lastSide: Side | null };
   recentTrades: string[];
+  /** Taker flow over several lookbacks, keyed "<ticks>t". */
+  flow: { [window: string]: FlowWindow };
+  /** Notional one entry would carry at each leverage rung, keyed by the rung. */
+  sizing: { [rung: string]: number };
+  /** What Jev answered on the previous tick. null on the first one. */
+  lastTick: { trend: Trend; intent: WireIntent; bias: WireBias; leverage: number } | null;
   position: {
     coin: string;
     side: "long" | "short" | "flat";
@@ -30,27 +38,22 @@ export interface TradeState {
     entry: number | null;
     leverage: number | null;
     liquidationPx: number | null;
-    distanceBps: number | null;
+    /** Mid against entry, signed, not flipped for a short. */
+    entryVsMidBps: number | null;
+    /** Mid to liquidationPx, absolute. Distinct from entryVsMidBps. */
+    liquidationDistBps: number | null;
     unrealizedUsd: number;
   };
-  indicators: {
-    sma20: number | null;
-    sma50: number | null;
-    ema20: number | null;
-    midVsSma20Bps: number | null;
-    midVsSma50Bps: number | null;
-    rsi14: number | null;
-    vol20Bps: number | null;
-    high20: number | null;
-    low20: number | null;
-    rangePos20: number | null;
-  };
+  /** One read per venue interval, keyed 1m/15m/1h/4h/1d. Same shape for each. */
+  mtf: { [tf: string]: IndicatorSnap };
   asset: {
     markPx: number | null;
     oraclePx: number | null;
     fundingBps: number | null;
     premiumBps: number | null;
     openInterest: number | null;
+    /** Open interest against the previous tick. A level alone carries no direction. */
+    openInterestChangeBps: number | null;
     dayNtlVlmUsd: number | null;
     dayChangeBps: number | null;
     maxLeverage: number;
@@ -62,6 +65,7 @@ export interface ModelDecision {
   action: Action;
   intent: Intent;
   bias: Bias;
+  trend: Trend;
   leverage: number;
   probabilities: {
     buy: number;
@@ -83,9 +87,12 @@ export interface Model {
 }
 
 /** Book, tape, and the open position. Wallet fills and lifetime PnL stay off this object. */
-export function marketFacing(state: TradeState) {
+export function marketFacing(state: TradeState, read: { trend: Trend } | null = null) {
   const pos = state.position;
   return {
+    guide: fieldGuide(state),
+    /** Jev's own trend answer for this tick. null while that answer is pending. */
+    read,
     coin: state.coin,
     market: state.market,
     tick: state.tick,
@@ -99,6 +106,9 @@ export function marketFacing(state: TradeState) {
     recentMids: state.recentMids,
     trades: state.trades,
     recentTrades: state.recentTrades,
+    flow: state.flow,
+    sizing: state.sizing,
+    lastTick: state.lastTick,
     position: {
       coin: pos.coin,
       side: pos.side,
@@ -107,17 +117,78 @@ export function marketFacing(state: TradeState) {
       entry: pos.entry,
       leverage: pos.leverage,
       liquidationPx: pos.liquidationPx,
-      distanceBps: pos.distanceBps,
+      entryVsMidBps: pos.entryVsMidBps,
+      liquidationDistBps: pos.liquidationDistBps,
       ...(pos.side === "flat" ? {} : { unrealizedUsd: pos.unrealizedUsd }),
     },
-    indicators: state.indicators,
+    mtf: state.mtf,
     asset: state.asset,
     maxLeverage: state.maxLeverage,
   };
 }
 
-/** Labels and live fields only. No advice about when to pick an action. */
-export function jevQuestions(state: TradeState) {
+/**
+ * What each number means, in units and sign. Naming a field, or saying what an
+ * action mechanically does, is not advice about when to act, so nothing here
+ * says which option to pick.
+ */
+export function fieldGuide(state: TradeState): string {
+  const asset = state.coin;
+  return [
+    `${asset} perp on Hyperliquid, ${state.market}. sizes in ${asset}, prices and notionals in quote currency. bps = 1e-4.`,
+    `guide = this list. read = your own trend answer for this tick, null while it is pending.`,
+    `mid = (bestBid+bestAsk)/2. spreadBps = (ask-bid)/mid in bps.`,
+    `bookImbalance = (bidSz-askSz)/(bidSz+askSz) within 100bps of mid, above 0 = more resting bids.`,
+    `depth[Nbps] = resting size within N bps of mid, per side. book = top 5 levels per side, best first, "price x size".`,
+    `returnsBps.lastK = mid change over the last K ticks. recentMids = mid every 5 ticks, oldest first.`,
+    `trades = taker prints over the full lookback. cvdSz = taker buy size minus taker sell size, above 0 = buyers lifting.`,
+    `flow["Nt"] = the same tape over the last N ticks, so a build and a fade are distinguishable. imbalance = cvdSz over total size, -1..1.`,
+    `recentTrades = "tick side size @ price", oldest first.`,
+    `mtf = one read per venue interval, keyed 1m 15m 1h 4h 1d, identical fields in each.`,
+    `mtf[tf].midVsEma200Bps = live mid against that interval's ema200. ema20VsEma200Bps = fast against slow there.`,
+    `mtf[tf].rangePos20 = (close-low)/(high-low) over 20 bars, 0 at the low, 1 at the high.`,
+    `mtf[tf].vol20Bps = stdev of log returns over 20 bars, in bps. changeBps = that interval's last bar against the one before.`,
+    `asset = venue context. fundingBps above 0 = longs pay shorts. premiumBps = mark against oracle. openInterestChangeBps = oi against the previous tick.`,
+    `sizing[rung] = the notional one entry carries at that leverage rung. margin locked is the same at every rung.`,
+    `lastTick = the most recent answers you gave, null before the first one. late ticks can put it further back than one tick.`,
+    `position.entryVsMidBps = mid against entry, signed, not flipped for a short.`,
+    `position.liquidationDistBps = mid to liquidationPx, absolute.`,
+    `null = not enough history for that field.`,
+  ].join(" ");
+}
+
+const GUIDE_POINTER = "field guide in state.guide";
+
+/** Phase one. Read the five intervals before any question about a side. */
+export function jevTrendQuestion(state: TradeState) {
+  const pos = state.position;
+  const stance = pos.side === "flat"
+    ? `flat ${state.coin}`
+    : `${pos.side} ${pos.size} ${state.coin} @ ${pos.entry ?? "?"}`;
+  return {
+    trend: {
+      type: "choice",
+      instructions: {
+        question: `${state.coin} trend across 1m 15m 1h 4h 1d?`,
+        goal: `${state.market}`,
+        timing: `tickMs=${state.tickMs}. position=${stance}.`,
+        inputs: GUIDE_POINTER,
+      },
+      criteria: {
+        up: "trending up",
+        down: "trending down",
+        range: "ranging",
+        unclear: "no clear read",
+      },
+    },
+  };
+}
+
+/**
+ * Phase two. Criteria say what each option does on the exchange, not when to
+ * pick it, so a choice is made against its real consequence.
+ */
+export function jevActionQuestions(state: TradeState) {
   const asset = state.coin;
   const pos = state.position;
   const stance = pos.side === "flat"
@@ -127,74 +198,67 @@ export function jevQuestions(state: TradeState) {
   const rungs = leverageRungs(state.maxLeverage);
   const levCriteria: Record<string, string> = {};
   for (const n of rungs) {
-    levCriteria[String(n)] = `${n}x`;
+    const ntl = state.sizing[String(n)];
+    levCriteria[String(n)] = ntl != null ? `${n}x, entry carries ${ntl} notional` : `${n}x`;
   }
-  const ctx = `${asset} ${state.market}. position has side/size/entry. indicators are 1m sma/ema/rsi/vol. asset is mark/oracle/funding/oi. trades and book are the tape.`;
-  const bias = {
-    type: "choice",
-    instructions: {
-      question: `long or short ${asset}?`,
-      goal: `${state.market}`,
-      timing: `tickMs=${state.tickMs}. position=${stance}.`,
-      inputs: ctx,
-    },
-    criteria: {
-      long: "long",
-      short: "short",
-    },
-  };
   const leverage = {
     type: "choice",
     instructions: {
       question: `cross leverage for ${asset}?`,
-      goal: `current ${levNow}. max ${state.maxLeverage}x.`,
+      goal: `current ${levNow}. max ${state.maxLeverage}x. the rung sets the notional sent, not the margin locked.`,
       timing: `rungs ${rungs.join(" ")}`,
-      inputs: ctx,
+      inputs: GUIDE_POINTER,
     },
     criteria: levCriteria,
   };
   if (pos.side === "flat") {
     return {
-      bias,
-      intent: {
+      entry: {
         type: "choice",
         instructions: {
-          question: `open or hold ${asset}?`,
+          question: `long, short, or wait on ${asset}?`,
           goal: `position=${stance}.`,
           timing: `tickMs=${state.tickMs}`,
-          inputs: ctx,
+          inputs: GUIDE_POINTER,
         },
         criteria: {
-          open: "open",
-          hold: "hold",
+          long: "buy to open, a post-only order that rests inside the touch",
+          short: "sell to open, a post-only order that rests inside the touch",
+          wait: "place nothing this tick and pull any resting order",
         },
       },
       leverage,
     };
   }
   return {
-    bias,
-    intent: {
+    manage: {
       type: "choice",
       instructions: {
-        question: `open, close, or hold ${asset}?`,
+        question: `close or hold the ${pos.side} on ${asset}?`,
         goal: `position=${stance}.`,
         timing: `tickMs=${state.tickMs}`,
-        inputs: ctx,
+        inputs: GUIDE_POINTER,
       },
       criteria: {
-        open: "open",
-        close: "close",
-        hold: "hold",
+        close: `flatten all ${pos.size} now, an Ioc that crosses the touch`,
+        hold: "keep the position and place nothing this tick",
       },
     },
     leverage,
   };
 }
 
+/** Both phases together. The live path asks them in order; this is the full set. */
+export function jevQuestions(state: TradeState) {
+  return { ...jevTrendQuestion(state), ...jevActionQuestions(state) };
+}
+
+const TRENDS = ["up", "down", "range", "unclear"] as const;
+
 interface Packed {
   intent: Intent;
   bias: Bias;
+  trend: Trend;
   leverage: number;
   longP: number;
   shortP: number;
@@ -219,6 +283,7 @@ function pack(o: Packed): ModelDecision {
     action,
     intent: o.intent,
     bias: o.bias,
+    trend: o.trend,
     leverage: o.leverage,
     probabilities: {
       buy: action === "buy" ? sized : 0,
@@ -270,9 +335,12 @@ function choiceProbs(answer: ChoiceAnswer | undefined, keys: readonly string[]):
 }
 
 type ChoiceAnswer = { choice?: string; probabilities?: Record<string, number> };
-type JevAnswers = { bias?: ChoiceAnswer; intent?: ChoiceAnswer; leverage?: ChoiceAnswer };
+type JevAnswers = { trend?: ChoiceAnswer; entry?: ChoiceAnswer; manage?: ChoiceAnswer; leverage?: ChoiceAnswer };
 
-/** Map a Jev answer set onto one tick. A side we cannot read is a hold, not a long. */
+/**
+ * Map a Jev answer set onto one tick. Flat asks for a side, an open position asks
+ * whether to keep it. A side we cannot read is a wait, not a long.
+ */
 export function decideFromJevAnswers(
   answers: JevAnswers,
   positionSide: "long" | "short" | "flat",
@@ -281,23 +349,37 @@ export function decideFromJevAnswers(
   latencyMs = 0,
   inputTokens = 0,
 ): ModelDecision {
-  const flat = positionSide === "flat";
-  const biasPick = pickKnown(answers.bias?.choice, ["long", "short"] as const);
-  const choices = flat ? (["open", "hold"] as const) : (["open", "close", "hold"] as const);
-  const intent = liveIntent(positionSide, biasPick ? pick(answers.intent?.choice, choices, "hold") : "hold");
-  const dir = choiceProbs(answers.bias, ["long", "short"]);
-  const act = choiceProbs(answers.intent, choices);
-  return pack({
-    intent,
-    bias: biasPick ?? "long",
+  const dir = choiceProbs(answers.trend, TRENDS);
+  const swing = dir.up! + dir.down!;
+  const common = {
+    trend: pick(answers.trend?.choice, TRENDS, "unclear"),
     leverage: parseLeverage(answers.leverage?.choice, maxLeverage, currentLeverage ?? 1),
-    longP: dir.long!,
-    shortP: dir.short!,
-    openP: act.open!,
-    closeP: act.close ?? 0,
-    holdP: act.hold!,
+    longP: swing > 0 ? dir.up! / swing : 0.5,
+    shortP: swing > 0 ? dir.down! / swing : 0.5,
     latencyMs,
     inputTokens,
+  };
+  if (positionSide === "flat") {
+    const entry = pickKnown(answers.entry?.choice, ["long", "short", "wait"] as const);
+    const act = choiceProbs(answers.entry, ["long", "short", "wait"]);
+    return pack({
+      ...common,
+      intent: entry === "long" || entry === "short" ? "open" : "hold",
+      bias: entry === "short" ? "short" : "long",
+      openP: act.long! + act.short!,
+      closeP: 0,
+      holdP: act.wait!,
+    });
+  }
+  const act = choiceProbs(answers.manage, ["close", "hold"]);
+  return pack({
+    ...common,
+    intent: pick(answers.manage?.choice, ["close", "hold"] as const, "hold"),
+    // Closing a long sells. The stance is the position being held, not a fresh view.
+    bias: positionSide,
+    openP: 0,
+    closeP: act.close!,
+    holdP: act.hold!,
   });
 }
 
@@ -311,8 +393,6 @@ function typesafeClient(): TypeSafeClient {
   }));
 }
 
-const JEV_DEADLINE_MS = 4000;
-
 function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`jev timeout ${ms}ms`)), ms);
@@ -323,30 +403,48 @@ function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-async function callJev(state: TradeState): Promise<{ answers: JevAnswers; inputTokens: number }> {
-  const seen = marketFacing(state);
-  const qs = jevQuestions(state);
-  const run = async () => {
-    if (config.jevProvider === "gateway") {
-      const r = await evaluate({
-        model: config.jevModelId,
-        state: seen as never,
-        questions: qs,
-        maxRetries: 0,
-      });
-      return { answers: r.answers, inputTokens: r.usage?.inputTokens ?? 0 };
-    }
-    const r = await typesafeClient().systemOne(
-      {
-        model: config.jevModelId,
-        state: seen as never,
-        questions: qs,
-      },
-      { retry: { maxRetries: 0 } },
-    );
-    return { answers: r.answers, inputTokens: r.usage.input_tokens ?? 0 };
+interface Asked {
+  answers: JevAnswers;
+  inputTokens: number;
+}
+
+async function ask(seen: unknown, questions: unknown): Promise<Asked> {
+  if (config.jevProvider === "gateway") {
+    const r = await evaluate({
+      model: config.jevModelId,
+      state: seen as never,
+      questions: questions as never,
+      maxRetries: 0,
+    });
+    return { answers: r.answers as JevAnswers, inputTokens: r.usage?.inputTokens ?? 0 };
+  }
+  const r = await typesafeClient().systemOne(
+    {
+      model: config.jevModelId,
+      state: seen as never,
+      questions: questions as never,
+    },
+    { retry: { maxRetries: 0 } },
+  );
+  return { answers: r.answers as JevAnswers, inputTokens: r.usage.input_tokens ?? 0 };
+}
+
+/**
+ * Two rounds on one tick. The first reads the intervals, the second decides with
+ * that read sitting in the state. A single flat question map carries no ordering,
+ * so the trend answer would otherwise race the side it is supposed to inform.
+ */
+async function callJev(state: TradeState): Promise<Asked> {
+  const run = async (): Promise<Asked> => {
+    const first = await ask(marketFacing(state), jevTrendQuestion(state));
+    const trend = pick(first.answers.trend?.choice, TRENDS, "unclear");
+    const second = await ask(marketFacing(state, { trend }), jevActionQuestions(state));
+    return {
+      answers: { ...first.answers, ...second.answers },
+      inputTokens: first.inputTokens + second.inputTokens,
+    };
   };
-  return withDeadline(run(), JEV_DEADLINE_MS);
+  return withDeadline(run(), config.jevDeadlineMs);
 }
 
 /** Real Jev. JEV_PROVIDER selects official TypeSafe or Vercel AI Gateway. */
@@ -376,12 +474,14 @@ export class MockModel implements Model {
     const flow = state.trades.buySz + state.trades.sellSz ? state.trades.cvdSz / (state.trades.buySz + state.trades.sellSz) : 0;
     const signal = state.returnsBps.last20 / 8 + state.bookImbalance * 1.5 + flow * 2 + this.noise(state.tick);
     const longP = 1 / (1 + Math.exp(-signal));
-    const bias: Bias = longP >= 0.5 ? "long" : "short";
-    const against = (bias === "long" && state.position.side === "short") || (bias === "short" && state.position.side === "long");
-    // A weak signal is not worth a round trip, so stand down instead of forcing a side.
-    const weak = Math.abs(signal) < 0.35;
-    const picked: Intent = against ? "close" : weak ? "hold" : "open";
-    const intent = liveIntent(state.position.side, picked);
+    const trend: Trend = signal > 0.35 ? "up" : signal < -0.35 ? "down" : "range";
+    const side = state.position.side;
+    // Flat picks a side or waits. An open position is only kept or closed.
+    const bias: Bias = side === "flat" ? (longP >= 0.5 ? "long" : "short") : side;
+    const against = (bias === "long" && signal < 0) || (bias === "short" && signal > 0);
+    const intent: Intent = side === "flat"
+      ? (Math.abs(signal) < 0.35 ? "hold" : "open")
+      : (against ? "close" : "hold");
     const holdP = intent === "hold" ? 0.7 : 0.15;
     const closeP = intent === "close" ? 0.7 : 0.15;
     const leverage = parseLeverage(1 + Math.abs(signal) * 8, state.maxLeverage, state.position.leverage ?? 1);
@@ -389,6 +489,7 @@ export class MockModel implements Model {
     return pack({
       intent,
       bias,
+      trend,
       leverage,
       longP,
       shortP: 1 - longP,

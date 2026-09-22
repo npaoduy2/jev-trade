@@ -1,3 +1,4 @@
+import { config } from "./config";
 import type { Fill, Side } from "./types";
 
 export interface TradePrint { block: number; price: number; size: number; side: Side }
@@ -26,13 +27,25 @@ export interface TradeSummary {
   lastSide: Side | null;
 }
 
+/** Taker flow over one lookback. `imbalance` is cvdSz over total size, -1..1. */
+export interface FlowWindow {
+  count: number;
+  buySz: number;
+  sellSz: number;
+  cvdSz: number;
+  imbalance: number;
+  maxBuySz: number;
+  maxSellSz: number;
+}
+
 export interface Resting { side: Side; price: number; size: number; block: number }
 
 export const emptySummary = (): TradeSummary => ({
   count: 0, buySz: 0, sellSz: 0, cvdSz: 0, vwap: null, lastPrice: null, lastSide: null,
 });
 
-const RING = 500;
+/** Memory guard only. The live window is `horizonBlocks`, pruned per tick. */
+const MAX_PRINTS = 50_000;
 
 /** WebSocket-backed print/fill ring. */
 export class TradeFeed {
@@ -43,6 +56,19 @@ export class TradeFeed {
 
   setTick(tick: number) {
     this.tick = tick;
+    this.prune();
+  }
+
+  /**
+   * Hold exactly what `summary` can still ask for. A count-capped ring silently
+   * shortened the window whenever prints outran the cap.
+   */
+  private prune() {
+    const cutoff = this.tick - config.horizonBlocks;
+    let drop = 0;
+    while (drop < this.trades.length && this.trades[drop]!.block <= cutoff) drop++;
+    if (drop) this.trades.splice(0, drop);
+    if (this.trades.length > MAX_PRINTS) this.trades.splice(0, this.trades.length - MAX_PRINTS);
   }
 
   pushPrint(p: Omit<TradePrint, "block"> & { block?: number }) {
@@ -50,7 +76,7 @@ export class TradeFeed {
     if (t.size <= 0 || t.price <= 0) return;
     this.trades.push(t);
     this.fresh.push(t);
-    if (this.trades.length > RING) this.trades.splice(0, this.trades.length - RING);
+    if (this.trades.length > MAX_PRINTS) this.trades.splice(0, this.trades.length - MAX_PRINTS);
   }
 
   pushFill(f: MakerFill) {
@@ -71,6 +97,32 @@ export class TradeFeed {
     }
     const vol = buySz + sellSz;
     return { count, buySz, sellSz, cvdSz: buySz - sellSz, vwap: vol > 0 ? notional / vol : null, lastPrice, lastSide };
+  }
+
+  /**
+   * The same tape over several lookbacks. One wide window cannot tell a push
+   * that is building from one that is fading.
+   */
+  flow(currentTick: number, windows: number[]): Record<string, FlowWindow> {
+    const out: Record<string, FlowWindow> = {};
+    for (const w of windows) {
+      const minTick = currentTick - w;
+      let count = 0, buySz = 0, sellSz = 0, maxBuySz = 0, maxSellSz = 0;
+      for (const t of this.trades) {
+        if (t.block <= minTick) continue;
+        count++;
+        if (t.side === "buy") {
+          buySz += t.size;
+          if (t.size > maxBuySz) maxBuySz = t.size;
+        } else {
+          sellSz += t.size;
+          if (t.size > maxSellSz) maxSellSz = t.size;
+        }
+      }
+      const vol = buySz + sellSz;
+      out[`${w}t`] = { count, buySz, sellSz, cvdSz: buySz - sellSz, imbalance: vol > 0 ? (buySz - sellSz) / vol : 0, maxBuySz, maxSellSz };
+    }
+    return out;
   }
 
   recent(n: number): TradePrint[] {
